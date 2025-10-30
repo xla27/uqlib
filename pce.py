@@ -1,6 +1,7 @@
 import os, sys, shutil
 
 import numpy as np
+import math
 from scipy.special import legendre, hermite
 from scipy.linalg import lstsq, inv
 
@@ -36,20 +37,19 @@ class PCE():
         for j, indices in enumerate(self.multindices):
 
             poly = []
-            types = self.type.split()
 
             for k, idx in enumerate(indices):
 
-                if types[k] == 'U':
+                if self.type[k] == 'U':
                     poly.append(legendre_norm(idx))
 
-                elif types[k] == 'N':
+                elif self.type[k] == 'N':
                     poly.append(hermite_norm(idx))
 
-                elif types[k] == 'G':
+                elif self.type[k] == 'G':
                     raise KeyError('Laguerre polynomials for Gamma distribution not yet implemented')
                 
-                elif types[k] == 'B':
+                elif self.type[k] == 'B':
                     raise KeyError('Jacobi polynomials for Beta distribution not yet implemented')
                 
             self.polynomials.append(poly)
@@ -167,7 +167,7 @@ def legendre_norm(k):
     return legendre(k) / np.sqrt(1 / (2*k + 1))
 
 def hermite_norm(k):
-    return hermite(k) / np.sqrt(np.math.factorial(k))
+    return hermite(k) / np.sqrt(math.factorial(k))
 
 
 ######################

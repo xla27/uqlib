@@ -5,7 +5,7 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ['OPENBLAS_NUM_THREADS'] = "1"
 
 import numpy as np
-from scipy.special import legendre, eval_legendre, hermite, eval_hermite
+import math
 from scipy.stats import qmc
 from sklearn.preprocessing import FunctionTransformer
 from sklearn.metrics import r2_score
@@ -74,7 +74,7 @@ for i ,p in enumerate(p_vec):
     pce = PCE(dim, degree=p, type='UUU', truncation=truncation)
 
     # cardinality
-    card = np.math.factorial(dim+p)/(np.math.factorial(dim) * np.math.factorial(p))
+    card = math.factorial(dim+p)/(math.factorial(dim) * math.factorial(p))
     print('card = ', card)
 
     # doe
