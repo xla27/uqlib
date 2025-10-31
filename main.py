@@ -93,14 +93,12 @@ for i ,p in enumerate(p_vec):
     pce.compute_coeffs(X, y, method='LSQ')
     print(pce.coeffs.shape)
 
-    delta_t[i] = time.time() - time_init
-
     # Sobol' indices
     Si[i,:] = pce.sobol_first()
     print('Si', Si[i,:])
 
     # Leave-One-Out error
-    err[i] = pce.error_loo()
+    err[i] = pce.compute_err_loo()
     print('err LOO = ', err[i])
 
 

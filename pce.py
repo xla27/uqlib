@@ -2,7 +2,7 @@ import os, sys, shutil
 
 import numpy as np
 import math
-from scipy.special import legendre, hermite
+from scipy.special import legendre, hermitenorm
 from scipy.linalg import lstsq, inv
 
 from itertools import product
@@ -69,15 +69,13 @@ class PCE():
 
         if method == 'LSQ':
 
-            for i in range(ndata):
+            for j, poly in enumerate(self.polynomials):
 
-                for j, poly in enumerate(self.polynomials):
-
-                    prod = 1
-                    for k, p in enumerate(poly):
-                        prod *= p(X[i,k])
-                    
-                    self.A[i,j] = prod
+                prod = 1
+                for k, p in enumerate(poly):
+                    prod *= p(X[:,k])
+                
+                self.A[:,j] = prod
 
             self.coeffs, _, _, _ = lstsq(self.A, self.y_train)
 
@@ -103,15 +101,14 @@ class PCE():
         ndata, _ = X.shape
         
         y = np.zeros(ndata)
-        for i in range(ndata):
 
-            for j, poly in enumerate(self.polynomials):
+        for j, poly in enumerate(self.polynomials):
 
-                prod = 1
-                for k, p in enumerate(poly):
-                    prod *= p(X[i,k])
-                
-                y[i] += self.coeffs[j] * prod  
+            prod = 1
+            for k, p in enumerate(poly):
+                prod *= p(X[:,k])
+            
+            y += self.coeffs[j] * prod  
 
         return y     
     
@@ -147,17 +144,41 @@ class PCE():
 
         return s / (V + np.finfo(float).eps)
     
-    def error_loo(self):
+    def compute_err_loo(self):
 
         h = np.diag(self.A @ inv(self.A.T @ self.A) @ self.A.T)
 
         ndata, _ = self.X_train.shape
 
-        err_loo = 0.0
-        for i in range(ndata):
-            err_loo += 1/ndata * ((self.y_train[i] - self.predict(self.X_train[i,:].reshape(1,self.dim))) / (1 - h[i]))**2
+        err_loo = 1/ndata * np.sum(((self.y_train - self.predict(self.X_train))/(np.ones(ndata) - h))**2)
+
+        self.err_loo = err_loo 
 
         return err_loo
+    
+    def compute_err_emp(self):
+
+        ndata, _ = self.X_train.shape
+
+        err_emp = 1/ndata * np.sum((self.y_train - self.predict(self.X_train)**2))
+
+        self.err_emp = err_emp
+
+        return err_emp
+    
+    def r2_score(self):
+
+        if not hasattr(self, 'err_emp'):
+            self.compute_err_emp()
+
+        return 1 - self.err_emp / np.var(self.y_train)
+    
+    def q2_score(self):
+
+        if not hasattr(self, 'err_loo'):
+            self.compute_err_loo()
+
+        return 1 - self.err_loo / np.var(self.y_train)
     
 
 ######################
@@ -167,7 +188,7 @@ def legendre_norm(k):
     return legendre(k) / np.sqrt(1 / (2*k + 1))
 
 def hermite_norm(k):
-    return hermite(k) / np.sqrt(math.factorial(k))
+    return hermitenorm(k) / np.sqrt(math.factorial(k))
 
 
 ######################
