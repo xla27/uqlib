@@ -98,7 +98,7 @@ for i ,p in enumerate(p_vec):
     print('Si', Si[i,:])
 
     # Leave-One-Out error
-    err[i] = pce.compute_err_loo()
-    print('err LOO = ', err[i])
+    err[i] = pce.compute_err_mse()
+    print('err MSE = ', err[i])
 
 

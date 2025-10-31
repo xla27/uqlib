@@ -82,6 +82,8 @@ class PCE():
         elif method == 'PROJ':
 
             raise NotImplementedError('Projection method using quadrature not yet implemented')
+        
+        self.h_loo = np.diag(self.A @ inv(self.A.T @ self.A) @ self.A.T)
 
     def moments(self):
 
@@ -144,41 +146,68 @@ class PCE():
 
         return s / (V + np.finfo(float).eps)
     
-    def compute_err_loo(self):
+    def compute_err_l1(self):
+        '''
+        L1 error computed through Leave-one-out.
+        '''
+        err_l1 = np.sum(np.abs((self.y_train - self.predict(self.X_train))/(np.ones(self.h_loo.shape) - self.h_loo)))
 
-        h = np.diag(self.A @ inv(self.A.T @ self.A) @ self.A.T)
+        self.err_l1 = err_l1
 
+        return err_l1
+    
+    def compute_err_l2(self):
+        '''
+        L2 error computed through Leave-one-out.
+        '''
+
+        err_l2 = np.sum(((self.y_train - self.predict(self.X_train))/(np.ones(self.h_loo.shape) - self.h_loo))**2)
+
+        self.err_l2 = err_l2
+
+        return err_l2
+    
+    def compute_err_mae(self):
+        '''
+        Mean absolute error computed through Leave-one-out.
+        '''
         ndata, _ = self.X_train.shape
 
-        err_loo = 1/ndata * np.sum(((self.y_train - self.predict(self.X_train))/(np.ones(ndata) - h))**2)
+        if not hasattr(self, 'err_l1'):
+            self.compute_err_l1()
 
-        self.err_loo = err_loo 
+        self.err_mae = self.err_l1 / ndata
 
-        return err_loo
+        return self.err_mae
     
     def compute_err_mse(self):
-
+        '''
+        Mean square error computed through Leave-one-out.
+        '''
         ndata, _ = self.X_train.shape
 
-        err_mse = 1/ndata * np.sum((self.y_train - self.predict(self.X_train))**2)
+        if not hasattr(self, 'err_l2'):
+            self.compute_err_l2()
 
-        self.err_mse = err_mse
+        self.err_mse = self.err_l2 / ndata
 
-        return err_mse
+        return self.err_mse
+    
+    def compute_err_rmse(self):
+        
+        if not hasattr(self, 'err_mse'):
+            self.compute_err_mse()
+
+        return np.sqrt(self.err_mse)
     
     def r2_score(self):
 
-        if not hasattr(self, 'err_emp'):
+        if not hasattr(self, 'err_mse'):
             self.compute_err_mse()
 
         return 1 - self.err_mse / np.var(self.y_train)
     
-    def q2_score(self):
 
-        if not hasattr(self, 'err_loo'):
-            self.compute_err_loo()
-
-        return 1 - self.err_loo / np.var(self.y_train)
     
 
 ######################
