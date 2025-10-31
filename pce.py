@@ -156,22 +156,22 @@ class PCE():
 
         return err_loo
     
-    def compute_err_emp(self):
+    def compute_err_mse(self):
 
         ndata, _ = self.X_train.shape
 
-        err_emp = 1/ndata * np.sum((self.y_train - self.predict(self.X_train)**2))
+        err_mse = 1/ndata * np.sum((self.y_train - self.predict(self.X_train))**2)
 
-        self.err_emp = err_emp
+        self.err_mse = err_mse
 
-        return err_emp
+        return err_mse
     
     def r2_score(self):
 
         if not hasattr(self, 'err_emp'):
-            self.compute_err_emp()
+            self.compute_err_mse()
 
-        return 1 - self.err_emp / np.var(self.y_train)
+        return 1 - self.err_mse / np.var(self.y_train)
     
     def q2_score(self):
 
