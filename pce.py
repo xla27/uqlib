@@ -185,10 +185,10 @@ class PCE():
 # ORTHONORMAL FUNCTIONS
 
 def legendre_norm(k):
-    return legendre(k) / np.sqrt(1 / (2*k + 1))
+    return legendre(k, monic=True) / np.sqrt(1 / (2*k + 1))
 
 def hermite_norm(k):
-    return hermitenorm(k) / np.sqrt(math.factorial(k))
+    return hermitenorm(k, monic=True) / np.sqrt(math.factorial(k))
 
 
 ######################
