@@ -167,7 +167,7 @@ class DataScaler(FunctionTransformer):
             if pdf == 'U':
                 lw = np.repeat(bndlw[i_pdf], ndata)
                 up = np.repeat(bndup[i_pdf], ndata)
-                X_out[:, i_pdf] = (X[:, i_pdf] - (up + lw)/2) + (up - lw)/2
+                X_out[:, i_pdf] = (X[:, i_pdf] - (up + lw)/2) / ((up - lw)/2)
 
             elif pdf == 'N':
                 mean = np.repeat(bndlw[i_pdf], ndata)
