@@ -2,7 +2,7 @@ import os, sys, shutil
 
 import numpy as np
 import math
-from scipy.special import legendre, hermitenorm
+from scipy.special import legendre, hermitenorm, genlaguerre, jacobi, gamma
 from scipy.linalg import lstsq, inv
 
 from itertools import product
@@ -13,15 +13,15 @@ class PCE():
 
     pdf_types = ['U', 'N', 'G', 'B']
 
-    def __init__(self, dim, degree, type, truncation):
+    def __init__(self, dim, degree, pdf_var, truncation):
 
         self.dim = dim        # size of input domain
         self.deg = degree     # maximum degree of polynomials
 
-        self.type = type      # pdf of reduced variables (U, N, G, B)
-        if any(t not in self.pdf_types for t in self.type):
+        self.pdf_var = pdf_var      # pdf of reduced variables (U, N, G, B)
+        if any(t not in self.pdf_types for t in self.pdf_var):
             raise KeyError('Invalide PDF for reduced variables')
-        if len(self.type) != self.dim:
+        if len(self.pdf_var) != self.dim:
             raise KeyError('Unspecified PDF kind for input size')
 
         # truncation scheme
@@ -40,23 +40,23 @@ class PCE():
 
             for k, idx in enumerate(indices):
 
-                if self.type[k] == 'U':
+                if self.pdf_var[k] == 'U':
                     poly.append(legendre_norm(idx))
 
-                elif self.type[k] == 'N':
+                elif self.pdf_var[k] == 'N':
                     poly.append(hermite_norm(idx))
 
                 elif self.type[k] == 'G':
                     raise KeyError('Laguerre polynomials for Gamma distribution not yet implemented')
                 
-                elif self.type[k] == 'B':
+                elif self.pdf_var[k] == 'B':
                     raise KeyError('Jacobi polynomials for Beta distribution not yet implemented')
                 
             self.polynomials.append(poly)
 
         return
 
-    def compute_coeffs(self, X, y, method):
+    def compute_coeffs(self, X, y, method, weights=None):
         """
         X is a (ndata, dim) numpy.array
         """
@@ -65,9 +65,10 @@ class PCE():
 
         self.X_train = X
         self.y_train = y
-        self.A = np.zeros((ndata, len(self.multindices)))
 
         if method == 'LSQ':
+
+            self.A = np.zeros((ndata, len(self.multindices)))
 
             for j, poly in enumerate(self.polynomials):
 
@@ -79,11 +80,25 @@ class PCE():
 
             self.coeffs, _, _, _ = lstsq(self.A, self.y_train)
 
+            self.h_loo = np.diag(self.A @ inv(self.A.T @ self.A) @ self.A.T)
+
         elif method == 'PROJ':
 
-            raise NotImplementedError('Projection method using quadrature not yet implemented')
-        
-        self.h_loo = np.diag(self.A @ inv(self.A.T @ self.A) @ self.A.T)
+            if weights is None:
+
+                raise ValueError('Provide weights for Gaussian quadrature!')
+            
+            self.coeffs = np.zeros(len(self.polynomials))
+
+            yw = self.y_train * weights
+
+            for j, poly in enumerate(self.polynomials): 
+
+                prod = 1
+                for k, p in enumerate(poly):
+                    prod *= p(X[:,k])
+
+                self.coeffs[j] = np.sum(yw * prod)
 
     def moments(self):
 
@@ -218,6 +233,9 @@ def legendre_norm(k):
 
 def hermite_norm(k):
     return hermitenorm(k, monic=True) / np.sqrt(math.factorial(k))
+
+def laguerre_norm(k, a=1.0):
+    return genlaguerre(k, a, monic=True) / np.sqrt(gamma(k+a+1) / math.factorial(k))
 
 
 ######################
