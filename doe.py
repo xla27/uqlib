@@ -11,7 +11,7 @@ import itertools
 import numpy          as np
 from scipy.stats    import qmc
 from scipy.spatial.distance import cdist
-from scipy.special import roots_legendre, roots_hermitenorm
+from scipy.special import roots_legendre, roots_hermitenorm, roots_genlaguerre
 from sklearn.preprocessing import FunctionTransformer
 
 # -------------------------------------------------------------------
@@ -43,8 +43,6 @@ class DoE():
             raise KeyError('Invalide PDF for reduced variables')
         if len(self.pdf_var) != self.dim:
             raise KeyError('Unspecified PDF kind for input size')
-        if 'G' in pdf_var:
-            raise NotImplementedError('Gamma distribution not yet implemented')
         if 'B' in pdf_var:
             raise NotImplementedError('Beta distribution not yet implemented')
         
@@ -78,7 +76,7 @@ class DoE():
                 X = np.hstack((X, x_u))
 
             elif pdf == 'N':
-                x_n = np.random.normal(0, 1, (ndata,1))
+                x_n = np.random.normal(0, 1, size=(ndata,1))
                 X = np.hstack((X, x_n))
 
         return X, w
@@ -97,10 +95,10 @@ class DoE():
             elif pdf == 'N':
                 roots, weights = roots_hermitenorm(point_per_dim)
                 points_d.append(roots)
-                weights_d.append(weights/np.sqrt(2*np.pi))   
+                weights_d.append(weights/np.sqrt(2*np.pi))  
 
         X = np.array(list(itertools.product(*points_d)))
-        w = np.prod(np.array(list(itertools.product(*points_d))), axis=1)
+        w = np.prod(np.array(list(itertools.product(*weights_d))), axis=1)
 
         return X, w
                                
