@@ -161,6 +161,13 @@ class PCE():
 
         return s / (V + np.finfo(float).eps)
     
+    def loo_predict(self):
+        '''
+        Leave-one-out prediction i.e., the prediction at x[i] from a surrogate trained without y_train[i]
+        M^{PC-i} = ( M^{PC}(x^{(i)}) - h_i M(x^{(i)} ) / ( 1 - h_i )
+        '''
+        return (self.predict(self.X_train) - self.h_loo * self.y_train)/((np.ones(self.h_loo.shape) - self.h_loo))
+    
     def compute_err_l1(self):
         '''
         L1 error computed through Leave-one-out.
