@@ -3,9 +3,9 @@ import os, sys, shutil
 import numpy as np
 import math
 from scipy.special import legendre, hermitenorm, genlaguerre, jacobi, gamma
-from scipy.linalg import lstsq, inv
+from scipy.linalg import lstsq, inv, cholesky, cho_solve, cho_factor
 
-from itertools import product
+from itertools import product, combinations
 
 
 # PCE class
@@ -78,9 +78,14 @@ class PCE():
                 
                 self.A[:,j] = prod
 
-            self.coeffs, _, _, _ = lstsq(self.A, self.y_train)
+            ATA = self.A.T @ self.A
+            ATAinv = cho_solve((cho_factor(ATA)),
+                                np.eye(len(self.multindices)),
+                                check_finite=False)
 
-            self.h_loo = np.diag(self.A @ inv(self.A.T @ self.A) @ self.A.T)
+            self.coeffs = ATAinv @ self.A.T @ self.y_train
+
+            self.h_loo = np.diag(self.A @ ATAinv @ self.A.T)
 
         elif method == 'PROJ':
 
@@ -142,6 +147,24 @@ class PCE():
             for j, indices in enumerate(self.multindices):
 
                 s[d] += self.coeffs[j]**2 if (indices[d] > 0 and np.sum([indices[i] for i in range(self.dim) if i != d]) == 0.0) else 0.0 
+
+        return s / (V + np.finfo(float).eps)
+    
+    def sobol_second(self):
+
+        if not self.coeffs.any():
+            raise KeyError('Coefficients do not exist! Surrogate yet to be built!')    
+
+        _, V = self.moments()
+
+        pairs = combinations(range(self.dim), 2)
+
+        s = np.zeros(int(self.dim * (self.dim - 1) / 2))
+        for d, pair in enumerate(pairs):
+
+            for j, indices in enumerate(self.multindices):
+
+                s[d] += self.coeffs[j]**2 if (indices[pair[0]] > 0 and indices[pair[1]] > 0 and np.sum([indices[i] for i in range(self.dim) if i not in pair]) == 0.0) else 0.0
 
         return s / (V + np.finfo(float).eps)
     
@@ -236,13 +259,13 @@ class PCE():
 # ORTHONORMAL FUNCTIONS
 
 def legendre_norm(k):
-    return legendre(k, monic=True) / np.sqrt(1 / (2*k + 1))
+    return legendre(k, monic=False) / np.sqrt(1 / (2*k + 1))
 
 def hermite_norm(k):
-    return hermitenorm(k, monic=True) / np.sqrt(math.factorial(k))
+    return hermitenorm(k, monic=False) / np.sqrt(math.factorial(k))
 
 def laguerre_norm(k, a=1.0):
-    return genlaguerre(k, a, monic=True) / np.sqrt(gamma(k+a+1) / math.factorial(k))
+    return genlaguerre(k, a, monic=False) / np.sqrt(gamma(k+a+1) / math.factorial(k))
 
 
 ######################
