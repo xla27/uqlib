@@ -61,14 +61,19 @@ class PCE():
         X is a (ndata, dim) numpy.array
         """
 
-        ndata, _ = X.shape
+        self.ndata, _ = X.shape
+        if y.ndim == 1:
+            self.noutputs = 1
+            y = y[:,np.newaxis]
+        else:
+            _, self.noutputs = y.shape
 
         self.X_train = X
         self.y_train = y
 
         if method == 'LSQ':
 
-            self.A = np.zeros((ndata, len(self.multindices)))
+            self.A = np.zeros((self.ndata, len(self.multindices)))
 
             for j, poly in enumerate(self.polynomials):
 
@@ -83,7 +88,8 @@ class PCE():
                                 np.eye(len(self.multindices)),
                                 check_finite=False)
 
-            self.coeffs = ATAinv @ self.A.T @ self.y_train
+            # coeffs = (npoly x noutputs) array
+            self.coeffs = ATAinv @ self.A.T @ self.y_train   
 
             self.h_loo = np.diag(self.A @ ATAinv @ self.A.T)
 
@@ -103,26 +109,26 @@ class PCE():
                 for k, p in enumerate(poly):
                     prod *= p(X[:,k])
 
-                self.coeffs[j] = np.sum(yw * prod)
+                self.coeffs[j,:] = np.sum(yw * prod, axis=0)
 
     def moments(self):
 
         if not self.coeffs.any():
             raise KeyError('Coefficients do not exist! Surrogate yet to be built!')
 
-        mean = self.coeffs[0]
-        var  = np.sum(self.coeffs[1:]**2)
+        mean = self.coeffs[0,:]
+        var  = np.sum(self.coeffs[1:,:]**2, axis=0)
 
-        return mean, var
+        return np.squeeze(mean), np.squeeze(var)
     
     def predict(self, X):
 
         if not self.coeffs.any():
             raise KeyError('Coefficients do not exist! Surrogate yet to be built!')
 
-        ndata, _ = X.shape
+        nsamples, _ = X.shape
         
-        y = np.zeros(ndata)
+        y = np.zeros((nsamples, self.noutputs))
 
         for j, poly in enumerate(self.polynomials):
 
@@ -130,9 +136,10 @@ class PCE():
             for k, p in enumerate(poly):
                 prod *= p(X[:,k])
             
-            y += self.coeffs[j] * prod  
+            y += (np.repeat(self.coeffs[j,:][np.newaxis,:], repeats=nsamples, axis=0) * 
+                  np.repeat(prod[:,np.newaxis], repeats=self.noutputs, axis=1))
 
-        return y     
+        return np.squeeze(y)     
     
     def sobol_first(self):
            
@@ -141,12 +148,12 @@ class PCE():
 
         _, V = self.moments()
 
-        s = np.zeros(self.dim)
+        s = np.zeros((self.dim, self.noutputs))
         for d in range(self.dim):
 
             for j, indices in enumerate(self.multindices):
 
-                s[d] += self.coeffs[j]**2 if (indices[d] > 0 and np.sum([indices[i] for i in range(self.dim) if i != d]) == 0.0) else 0.0 
+                s[d,:] += self.coeffs[j,:]**2 if (indices[d] > 0 and np.sum([indices[i] for i in range(self.dim) if i != d]) == 0.0) else 0.0 
 
         return s / (V + np.finfo(float).eps)
     
@@ -159,12 +166,12 @@ class PCE():
 
         pairs = combinations(range(self.dim), 2)
 
-        s = np.zeros(int(self.dim * (self.dim - 1) / 2))
+        s = np.zeros((int(self.dim * (self.dim - 1) / 2), self.noutputs))
         for d, pair in enumerate(pairs):
 
             for j, indices in enumerate(self.multindices):
 
-                s[d] += self.coeffs[j]**2 if (indices[pair[0]] > 0 and indices[pair[1]] > 0 and np.sum([indices[i] for i in range(self.dim) if i not in pair]) == 0.0) else 0.0
+                s[d,:] += self.coeffs[j,:]**2 if (indices[pair[0]] > 0 and indices[pair[1]] > 0 and np.sum([indices[i] for i in range(self.dim) if i not in pair]) == 0.0) else 0.0
 
         return s / (V + np.finfo(float).eps)
     
@@ -175,12 +182,12 @@ class PCE():
 
         _, V = self.moments()
 
-        s = np.zeros(self.dim)
+        s = np.zeros((self.dim, self.noutputs))
         for d in range(self.dim):
 
             for j, indices in enumerate(self.multindices):
 
-                s[d] += self.coeffs[j]**2 if indices[d] > 0 else 0.0 
+                s[d,:] += self.coeffs[j,:]**2 if indices[d] > 0 else 0.0 
 
         return s / (V + np.finfo(float).eps)
     
@@ -189,39 +196,45 @@ class PCE():
         Leave-one-out prediction i.e., the prediction at x[i] from a surrogate trained without y_train[i]
         M^{PC-i} = ( M^{PC}(x^{(i)}) - h_i M(x^{(i)} ) / ( 1 - h_i )
         '''
-        return (self.predict(self.X_train) - self.h_loo * self.y_train)/((np.ones(self.h_loo.shape) - self.h_loo))
+        loo_predict = np.zeros((self.ndata, self.noutputs))
+        for i_out in range(self.noutputs):
+            loo_predict[:, i_out] = (self.predict(self.X_train)[:,i_out] - self.h_loo * self.y_train[:,i_out])/((np.ones(self.h_loo.shape) - self.h_loo))
     
+        return np.squeeze(loo_predict)
+
     def compute_err_l1(self):
         '''
         L1 error computed through Leave-one-out.
         '''
-        err_l1 = np.sum(np.abs((self.y_train - self.predict(self.X_train))/(np.ones(self.h_loo.shape) - self.h_loo)))
+        err_l1 = np.zeros(self.noutputs)
+        for i_out in range(self.noutputs):
+            err_l1[i_out] = np.sum(np.abs((self.y_train[:,i_out] - self.predict(self.X_train)[:,i_out])/(np.ones(self.h_loo.shape) - self.h_loo)))
 
-        self.err_l1 = err_l1
+        self.err_l1 = np.squeeze(err_l1)
 
-        return err_l1
+        return np.squeeze(err_l1)
     
     def compute_err_l2(self):
         '''
         L2 error computed through Leave-one-out.
         '''
+        err_l2 = np.zeros(self.noutputs)
+        for i_out in range(self.noutputs):
+            err_l2[i_out] = np.sum(((self.y_train[:,i_out] - self.predict(self.X_train)[:,i_out])/(np.ones(self.h_loo.shape) - self.h_loo))**2)
 
-        err_l2 = np.sum(((self.y_train - self.predict(self.X_train))/(np.ones(self.h_loo.shape) - self.h_loo))**2)
+        self.err_l2 = np.squeeze(err_l2)
 
-        self.err_l2 = err_l2
-
-        return err_l2
+        return np.squeeze(err_l2)
     
     def compute_err_mae(self):
         '''
         Mean absolute error computed through Leave-one-out.
         '''
-        ndata, _ = self.X_train.shape
 
         if not hasattr(self, 'err_l1'):
             self.compute_err_l1()
 
-        self.err_mae = self.err_l1 / ndata
+        self.err_mae = self.err_l1 / self.ndata
 
         return self.err_mae
     
@@ -229,12 +242,11 @@ class PCE():
         '''
         Mean square error computed through Leave-one-out.
         '''
-        ndata, _ = self.X_train.shape
 
         if not hasattr(self, 'err_l2'):
             self.compute_err_l2()
 
-        self.err_mse = self.err_l2 / ndata
+        self.err_mse = self.err_l2 / self.ndata
 
         return self.err_mse
     
@@ -250,7 +262,11 @@ class PCE():
         if not hasattr(self, 'err_mse'):
             self.compute_err_mse()
 
-        return 1 - self.err_mse / np.var(self.y_train)
+        score = np.zeros(self.noutputs)
+        for i_out in range(self.noutputs):
+            score[i_out] = 1 - self.err_mse[i_out] / np.var(self.y_train[:,i_out])
+
+        return np.squeeze(score)
     
 
     
