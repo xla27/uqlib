@@ -6,7 +6,7 @@ import copy
 from . import PCE
  
 
-class ROM():
+class PODPCE():
 
     def __init__(self, dim, degree, pdf_var, truncation):
 
