@@ -7,36 +7,50 @@ from . import PCE
  
 
 class PODPCE():
+    '''
+    Nomenclature:
+    - X are the random input variables of the model
+    - Y is the full-order output of the computational model
+    - Z is the set of latent variables (obtained through isomap)
+    '''
 
     def __init__(self, dim, degree, pdf_var, truncation):
 
-        self.pce_parameters = {'dim':        dim,
-                               'degree':     degree,
-                               'pdf_var':    pdf_var,
-                               'truncation': truncation}
+        self.dim     = dim
+        self.pdf_var = pdf_var
 
-    def compute_pod(self, Z, delta=0.9999):
+        # building a PCE object
+        self.pce = PCE(dim, degree, pdf_var, truncation)
 
-        dim_pod, ndata_pod = Z.shape
-        rank = min(dim_pod, ndata_pod)
+    def compute_pod(self, Y, delta=0.9999):
+        '''
+        Z is an (M x N) array with:
+        - M number of snaphsots
+        - N output size of the computational model
+        '''
+        Y = np.asarray(Y)
+        if Y.ndim != 2:
+            raise ValueError("Y must be 2D array of shape (M, N)")
+
+        self.ndata, self.noutputs = Y.shape
+        rank = min(self.ndata, self.noutputs)
 
         # mean-normalization
-        self.Z_mean = np.mean(Z, axis = 1)
-        Z_clean = Z - np.repeat(self.Z_mean[:,np.newaxis], repeats=ndata_pod, axis=1)
+        self.Y_mean = np.mean(Y, axis=0)
+        self.snapshots = Y - np.repeat(self.Y_mean[np.newaxis,:], self.ndata, axis=0)
 
         # singular value decomposition
-        U, sigma, Vh = svd(Z_clean)
+        U, sigma, Vh = svd(self.snapshots.T)
 
         d = 1
-        for d in range(1, dim_pod):
+        for d in range(1, sigma.shape[0]+1):
             ric = np.sum(sigma[:d]**2) / np.sum(sigma[:rank]**2)
             if ric > delta:
+                self.pod_degree = d      # latent space dimensionality
                 break
 
-        self.pod_degree = d
-
-        self.modes = U[:,:self.pod_degree]
-        self.latent = self.modes.T @ Z_clean
+        self.modes = U[:,:self.pod_degree]             # POD modes (Nxd) array
+        self.latent = self.modes.T @ self.snapshots.T  # latent basis (dxM) array
 
         return
 
@@ -45,42 +59,32 @@ class PODPCE():
         if not hasattr(self, 'latent'):
             raise KeyError('You to first do the POD!')
         
-        # generating a list of pce
-        self.pces = [copy.deepcopy(PCE(**self.pce_parameters)) for i in range(self.pod_degree)]
-        
-        for i_pce, pce in enumerate(self.pces):
-            y_train = self.latent[i_pce,:]
-            pce.compute_coeffs(X, y_train, method=method, weights=weights)
+        # computing the PCE coefficients on the latent space basis
+        self.pce.compute_coeffs(X, self.latent.T, method=method, weights=weights)
         
     def mean(self):
-        mean = self.Z_mean
 
-        for i_pce, pce in enumerate(self.pces):
-            mean += self.modes[:, i_pce] * pce.moments()[0]
-        
+        mean = self.Y_mean + self.modes @ self.pce.moments()[0]
+
         return mean
     
     def variance(self):
-        variance = np.zeros(self.Z_mean.shape[0])
 
-        for i_pce, pce_i in enumerate(self.pces):
-            variance += self.modes[:, i_pce]**2 * pce_i.moments()[1]
+        variance = np.zeros(self.noutputs)
 
-            for j_pce, pce_j in enumerate(self.pces):
-                if j_pce != i_pce:
-                    covariance_ij = np.sum(pce_i.coeffs[1:] * pce_j.coeffs[1:])
-                    variance += self.modes[:,i_pce] * self.modes[:,j_pce] * covariance_ij
-                else:
-                    variance += 0.0
-        
+        for i in range(self.pod_degree):
+            for j in range(self.pod_degree):
+                pce_variance = np.sum(self.pce.coeffs[1:,i] * self.pce.coeffs[1:,j])
+                variance += self.modes[:,i] * self.modes[:,j] * pce_variance
+
         return variance
     
     def predict(self, X):
 
-        npred, _ = X.shape
-        Z_pred = np.repeat(self.Z_mean[:,np.newaxis], repeats=npred, axis=1)
+        nsamples, _ = X.shape
 
-        for i_pce, pce in enumerate(self.pces): 
-            Z_pred += np.repeat(self.modes[:, i_pce][:,np.newaxis], repeats=npred, axis=1) * pce.predict(X)
+        Y_pred = np.repeat(self.Y_mean[np.newaxis,:], repeats=nsamples, axis=0)
 
-        return Z_pred
+        Y_pred += np.transpose( self.modes @ self.pce.predict(X).T )
+
+        return Y_pred
