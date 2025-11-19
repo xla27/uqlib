@@ -58,7 +58,10 @@ class PCE():
 
     def compute_coeffs(self, X, y, method, weights=None):
         """
-        X is a (ndata, dim) numpy.array
+        X is a (ndata, dim) numpy.array of inputs
+        y is a (ndata, noutputs) numpy.array of training outputs
+
+        coeffs is a (degree, noutputs) numpy.array of noutputs independent PCEs
         """
 
         self.ndata, _ = X.shape
@@ -112,6 +115,9 @@ class PCE():
                 self.coeffs[j,:] = np.sum(yw * prod, axis=0)
 
     def moments(self):
+        '''
+        mean, var are (noutputs,) arrays
+        '''
 
         if not self.coeffs.any():
             raise KeyError('Coefficients do not exist! Surrogate yet to be built!')
@@ -122,6 +128,10 @@ class PCE():
         return np.squeeze(mean), np.squeeze(var)
     
     def predict(self, X):
+        """
+        X is a (nsamples, dim) numpy.array of inputs
+        y is a (nsamples, noutputs) numpy.array of predictions
+        """
 
         if not self.coeffs.any():
             raise KeyError('Coefficients do not exist! Surrogate yet to be built!')
@@ -142,6 +152,9 @@ class PCE():
         return np.squeeze(y)     
     
     def sobol_first(self):
+        """
+        s is a (dim, noutputs) numpy.array of first order Sobol' indices
+        """
            
         if not self.coeffs.any():
             raise KeyError('Coefficients do not exist! Surrogate yet to be built!')    
@@ -158,6 +171,9 @@ class PCE():
         return s / (V + np.finfo(float).eps)
     
     def sobol_second(self):
+        """
+        s is a (dim*(dim-1)/2, noutputs) numpy.array of second order Sobol' indices
+        """
 
         if not self.coeffs.any():
             raise KeyError('Coefficients do not exist! Surrogate yet to be built!')    
@@ -176,6 +192,9 @@ class PCE():
         return s / (V + np.finfo(float).eps)
     
     def sobol_total(self):
+        """
+        s is a (dim, noutputs) numpy.array of total Sobol' indices
+        """
 
         if not self.coeffs.any():
             raise KeyError('Coefficients do not exist! Surrogate yet to be built!')    
