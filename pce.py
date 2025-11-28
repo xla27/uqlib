@@ -58,7 +58,10 @@ class PCE():
 
     def compute_coeffs(self, X, y, method, weights=None):
         """
-        X is a (ndata, dim) numpy.array
+        X is a (ndata, dim) numpy.array of inputs
+        y is a (ndata, noutputs) numpy.array of training outputs
+
+        coeffs is a (degree, noutputs) numpy.array of noutputs independent PCEs
         """
 
         self.ndata, _ = X.shape
@@ -91,7 +94,11 @@ class PCE():
             # coeffs = (npoly x noutputs) array
             self.coeffs = ATAinv @ self.A.T @ self.y_train   
 
-            self.h_loo = np.diag(self.A @ ATAinv @ self.A.T)
+            # utilitiess for loo
+            h_loo = np.diag(self.A @ ATAinv @ self.A.T)
+            utility_loo = np.ones(h_loo.shape) - h_loo
+            self.h_loo = h_loo
+            self.utility_loo = np.repeat(utility_loo[:,np.newaxis], repeats=self.noutputs, axis=1)
 
         elif method == 'PROJ':
 
@@ -112,6 +119,9 @@ class PCE():
                 self.coeffs[j,:] = np.sum(yw * prod, axis=0)
 
     def moments(self):
+        '''
+        mean, var are (noutputs,) arrays
+        '''
 
         if not self.coeffs.any():
             raise KeyError('Coefficients do not exist! Surrogate yet to be built!')
@@ -122,6 +132,10 @@ class PCE():
         return np.squeeze(mean), np.squeeze(var)
     
     def predict(self, X):
+        """
+        X is a (nsamples, dim) numpy.array of inputs
+        y is a (nsamples, noutputs) numpy.array of predictions
+        """
 
         if not self.coeffs.any():
             raise KeyError('Coefficients do not exist! Surrogate yet to be built!')
@@ -142,6 +156,9 @@ class PCE():
         return np.squeeze(y)     
     
     def sobol_first(self):
+        """
+        s is a (dim, noutputs) numpy.array of first order Sobol' indices
+        """
            
         if not self.coeffs.any():
             raise KeyError('Coefficients do not exist! Surrogate yet to be built!')    
@@ -158,6 +175,9 @@ class PCE():
         return s / (V + np.finfo(float).eps)
     
     def sobol_second(self):
+        """
+        s is a (dim*(dim-1)/2, noutputs) numpy.array of second order Sobol' indices
+        """
 
         if not self.coeffs.any():
             raise KeyError('Coefficients do not exist! Surrogate yet to be built!')    
@@ -176,6 +196,9 @@ class PCE():
         return s / (V + np.finfo(float).eps)
     
     def sobol_total(self):
+        """
+        s is a (dim, noutputs) numpy.array of total Sobol' indices
+        """
 
         if not self.coeffs.any():
             raise KeyError('Coefficients do not exist! Surrogate yet to be built!')    
@@ -196,19 +219,16 @@ class PCE():
         Leave-one-out prediction i.e., the prediction at x[i] from a surrogate trained without y_train[i]
         M^{PC-i} = ( M^{PC}(x^{(i)}) - h_i M(x^{(i)} ) / ( 1 - h_i )
         '''
-        loo_predict = np.zeros((self.ndata, self.noutputs))
-        for i_out in range(self.noutputs):
-            loo_predict[:, i_out] = (self.predict(self.X_train)[:,i_out] - self.h_loo * self.y_train[:,i_out])/((np.ones(self.h_loo.shape) - self.h_loo))
-    
+        h_loo = np.repeat(self.h_loo[:,np.newaxis], repeats=self.noutputs, axis=1)
+        loo_predict = (self.predict(self.X_train) - h_loo * self.y_train) / self.utility_loo
+
         return np.squeeze(loo_predict)
 
     def compute_err_l1(self):
         '''
         L1 error computed through Leave-one-out.
         '''
-        err_l1 = np.zeros(self.noutputs)
-        for i_out in range(self.noutputs):
-            err_l1[i_out] = np.sum(np.abs((self.y_train[:,i_out] - self.predict(self.X_train)[:,i_out])/(np.ones(self.h_loo.shape) - self.h_loo)))
+        err_l1 = np.sum(np.abs((self.y_train - self.predict(self.X_train))/ self.utility_loo), axis=0)
 
         self.err_l1 = np.squeeze(err_l1)
 
@@ -218,9 +238,7 @@ class PCE():
         '''
         L2 error computed through Leave-one-out.
         '''
-        err_l2 = np.zeros(self.noutputs)
-        for i_out in range(self.noutputs):
-            err_l2[i_out] = np.sum(((self.y_train[:,i_out] - self.predict(self.X_train)[:,i_out])/(np.ones(self.h_loo.shape) - self.h_loo))**2)
+        err_l2 = np.sum(((self.y_train - self.predict(self.X_train))/ self.utility_loo)**2, axis=0)
 
         self.err_l2 = np.squeeze(err_l2)
 
@@ -262,9 +280,7 @@ class PCE():
         if not hasattr(self, 'err_mse'):
             self.compute_err_mse()
 
-        score = np.zeros(self.noutputs)
-        for i_out in range(self.noutputs):
-            score[i_out] = 1 - self.err_mse[i_out] / np.var(self.y_train[:,i_out])
+        score = np.ones(self.noutputs) - self.err_mse / np.var(self.y_train, axis=0)
 
         return np.squeeze(score)
     
