@@ -258,13 +258,17 @@ class ISOMAPPCE():
 
         # forcing the regularization term
         G_tilde = G + np.diag(c)
+        A = 2*G_tilde
         
         # solution of the constrained optimization problem
-        try:
-            L = cholesky(2*G_tilde, lower=True)
-        except:
-            eps = np.abs(eigvalsh(2*G_tilde)[-1])
-            L = cholesky(2*G_tilde + eps*np.eye(len(neigh_indices)), lower=True)
+        while True:
+            try:
+                L = cholesky(A, lower=True)
+                break
+            except:
+                l, V = eigh(A)
+                A = V @ np.diag(np.clip(l, a_min=1e-8, a_max=None)) @ V.T
+                i+=1
 
         inv = cho_solve((L,True), np.eye(len(neigh_indices)))
         S = - np.ones(len(neigh_indices)).T @ inv @ np.ones(len(neigh_indices))
