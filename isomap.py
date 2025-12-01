@@ -1,8 +1,8 @@
 import os, sys, shutil
 import numpy as np
-from scipy.linalg import svd, eigh
+from scipy.linalg import svd, eigh, eig, cholesky, cho_solve, eigvalsh
 from scipy.spatial.distance import pdist, cdist, squareform
-from scipy.optimize import minimize, LinearConstraint, Bounds, fmin_slsqp
+from scipy.stats import qmc, norm, uniform
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import shortest_path
 from sklearn.neighbors import NearestNeighbors
@@ -41,11 +41,10 @@ class ISOMAPPCE():
         self.ndata, self.noutputs = Y.shape
 
         # removing the mean
-        #self.Y_mean = np.mean(Y, axis=0)
-        snapshots = Y #- np.repeat(self.Y_mean[np.newaxis,:], self.ndata, axis=0)
+        snapshots = Y
 
         # looping to finde the optimal k_near
-        k_max = max(int(np.log(self.ndata) * 10) , self.ndata-1)
+        k_max = max(int(np.log10(self.ndata) * 10) , self.ndata-1)
         k_list = [k for k in range(1, k_max)]
         kruskal_list = []
         eigvals_list = []
@@ -61,12 +60,9 @@ class ISOMAPPCE():
                 elif distance == 'euclidean':
                     D = squareform(pdist(snapshots, metric='euclidean'))
 
-                # computing D_tilde
-                D_tilde = 0.5 * D**2
-
-                # removing row-wise and column-wise mean from D_tilde
+                # Centering the square of D i.e., D_tilde
                 H = np.eye(self.ndata) - 1/self.ndata * np.ones((self.ndata, self.ndata))
-                B = H @ D_tilde @ H
+                B = - H @ D**2 @ H
 
                 # eigendecomposing B
                 eigvals_k, eigvecs_k = eigh(B, subset_by_value=[0.0, np.inf], driver='evr')
@@ -92,13 +88,6 @@ class ISOMAPPCE():
         self.k_near = k_list[ind_opt]
         eigvals_opt = eigvals_list[ind_opt]
         eigvecs_opt = eigvecs_list[ind_opt]
-
-        # # reordering eigvels, eigvecs and snapshots according descending magnitude order
-        # idx_sort = np.argsort(-np.abs(eigvals_opt))
-        # print(idx_sort)
-        # eigvals_opt = eigvals_opt[idx_sort]
-        # eigvecs_opt = eigvecs_opt[:,idx_sort]
-        # self.snapshots = snapshots[idx_sort,:]
 
         # relative information content to cut additional modes if unnecessary
         d = 1
@@ -149,15 +138,15 @@ class ISOMAPPCE():
 
         nsamples, _ = X.shape
 
-        Y_pred = np.zeros((nsamples, self.noutputs))#np.repeat(self.Y_mean[np.newaxis,:], repeats=nsamples, axis=0)
+        Y_pred = np.zeros((nsamples, self.noutputs))
+
+        # predicting the latent variable through PCE 
+        Z_pred = np.atleast_2d( self.pce.predict(X) )
 
         for smp in range(nsamples):
 
-        # predicting the latent variable through PCE 
-            z_pred = self.pce.predict(np.atleast_2d(X[smp,:]))
-
             # finding the optimal weight of the training latent variables closest to the prediction
-            w_opt, neigh_indices = self._backmapping(z_pred)
+            w_opt, neigh_indices = self._backmapping(Z_pred[smp,:])
 
             # prediction as weighted linear linear combination of the near snaps 
             Y_pred[smp,:] += self.snapshots[neigh_indices, :].T @ w_opt 
@@ -172,11 +161,14 @@ class ISOMAPPCE():
 
         for i_var, var in enumerate(self.pdf_var):
 
-            if var == 'U':
-                X[:,i_var] = np.random.uniform(-1, 1, n_samples)
+            sampler = qmc.LatinHypercube(d = 1)
+            samples = np.squeeze(sampler.random(n_samples))
 
+            if var == 'U':
+                #X[:,i_var] = qmc.scale(samples, np.array([-1]), np.array([1]))
+                X[:,i_var] = uniform.ppf(samples, loc=-1, scale=2)
             elif var == 'N':
-                X[:,i_var] = np.random.normal(0, 1, n_samples)
+                X[:,i_var] = norm.ppf(samples)
 
         return X
 
@@ -227,7 +219,7 @@ class ISOMAPPCE():
         # np.inf indicates no path between nodes.
         
         return dist_matrix
-    
+        
     def _kruskal_stress(self, D, Z_tilde):
         '''
         Metric to evaluate the optimum number k of nearest neighbors
@@ -235,16 +227,17 @@ class ISOMAPPCE():
         num = np.sum( ( D - squareform( pdist(Z_tilde, metric='euclidean') ) )**2 )
         den = np.sum(D**2)
         return np.sqrt(num/den)
-    
+       
     def _backmapping(self, z_pred):
         '''
         Backmapping procedure from sampled latent variable z_pred to find the 
-        optimal weights and the indexes of the k-nearest neighbors among the snapshots
+        optimal weights and the indexes of the k-nearest neighbors among the snapshots.
+        The backmapping weights are an exact solution of a convex quadratic optimization problem subject
+        to linear constraints.
+        The solution exploits the Schur complement, see Franz et al..
         '''
 
-        # if z_pred.ndim < 2:
-        #     z_pred = z_pred[np.newaxis,:]
-
+        # finding k-nearest neighbors of z_pred
         nn = NearestNeighbors(n_neighbors=self.k_near, 
                               metric='euclidean', 
                               algorithm='auto')
@@ -253,46 +246,29 @@ class ISOMAPPCE():
 
         neighs = self.latent[:, neigh_indices]
 
+        # gram matrix G
+        tmp = np.repeat(np.atleast_2d(z_pred).T, repeats=len(neigh_indices), axis=1)
+        G = (tmp - neighs).T @ (tmp - neighs) 
+
         # regularization coeffs
         c = np.zeros(self.k_near)
         for i in range(self.k_near):
             c[i] = np.linalg.norm(z_pred - neighs[:,i], 2.0)
         c = 0.01 * (c / np.amax(c))**4.0
 
-        def backmap_obj(w):
-            obj = np.linalg.norm(z_pred - neighs.dot(w), 2.0)**2 + c.dot(w**2)
-            return obj
+        # forcing the regularization term
+        G_tilde = G + np.diag(c)
         
-        def backmap_obj_grad(w):
-            grad = - 2 * np.sum(z_pred - neighs.dot(w)) * np.sum(neighs, axis=0) + 2 * c
-            return grad
-        
-        def backmap_con(w):
-            return np.sum(w) - 1
-        
-        def backmap_con_grad(w):
-            return np.ones(w.shape[0])
+        # solution of the constrained optimization problem
+        try:
+            L = cholesky(2*G_tilde, lower=True)
+        except:
+            eps = np.abs(eigvalsh(2*G_tilde)[-1])
+            L = cholesky(2*G_tilde + eps*np.eye(len(neigh_indices)), lower=True)
 
-        weight_bnd = [(-2,2)] * self.k_near
-
-        w_list = []
-        f_list = []
-        for _ in range(10):
-            w0 = np.random.uniform(-2, 2, self.k_near)
-            w_opt_i, f_opt_i, _, _, _ = fmin_slsqp(backmap_obj, 
-                                                w0,
-                                                bounds=weight_bnd,
-                                                f_eqcons=backmap_con,
-                                                fprime=backmap_obj_grad,
-                                                fprime_eqcons=backmap_con_grad,
-                                                acc=1e-8,
-                                                iter=10000,
-                                                disp=0,
-                                                full_output=True) 
-            w_list.append(w_opt_i)
-            f_list.append(f_opt_i)
-
-        w_opt = np.array(w_list)[np.argmin(np.array(f_list)),:]
+        inv = cho_solve((L,True), np.eye(len(neigh_indices)))
+        S = - np.ones(len(neigh_indices)).T @ inv @ np.ones(len(neigh_indices))
+        w_opt = - 1/S * inv @ np.ones(len(neigh_indices))  
 
         return w_opt, neigh_indices
 
