@@ -2,13 +2,12 @@ import os, sys, shutil, copy
 import multiprocessing
 
 import numpy as np
-import math
-from scipy.special import legendre, hermitenorm, genlaguerre, jacobi, gamma
 from scipy.linalg import lstsq, inv, cholesky, cho_solve, cho_factor, solve, solve_triangular
 from scipy.stats import qmc, uniform, norm
 from scipy.optimize import minimize
 
-from sklearn.gaussian_process import GaussianProcessRegressor
+from SALib.sample import saltelli
+from SALib.analyze import sobol
 
 from itertools import repeat, product, combinations
 
@@ -30,6 +29,12 @@ class PCKriging(PCE):
     def training(self, X, y):
 
         self.ndata, _ = X.shape
+            
+        if y.ndim == 1:
+            y = y[:, np.newaxis]
+            self.noutputs = 1
+        else:
+            self.noutputs = y.shape[1]
         
         self.X_train = X
         self.y_train = y
@@ -71,7 +76,7 @@ class PCKriging(PCE):
 
         self.y_disc_ = self.y_train - self.F @ self.beta_hat
         self.alpha_ = cho_solve((self.L_, True),  self.y_disc_, check_finite=False)
-        self.sigma2_hat = 1/self.ndata * self.y_disc_ @ self.alpha_
+        self.sigma2_hat = 1/self.ndata * np.einsum("ik,ik->k", self.y_disc_, self.alpha_)
 
         return
     
@@ -81,18 +86,123 @@ class PCKriging(PCE):
 
         r_trans = self.kernel_(X, self.X_train)
 
-        y_mean = f.dot(self.beta_hat) + self.kernel_(X, self.X_train) @ self.alpha_
+        y_mean = f.dot(self.beta_hat) + r_trans @ self.alpha_
     
         if return_cov:
             V = solve_triangular(self.L_, r_trans.T, lower=True, check_finite=False)
             y_cov = self.kernel_(X) - V.T @ V
-            y_cov *= self.sigma2_hat 
+            y_cov = self.sigma2_hat.reshape(1,1,self.noutputs) * np.repeat(y_cov[...,np.newaxis], self.noutputs, axis=-1) 
             
             return y_mean, y_cov
 
         else:
             return y_mean
     
+    def moments(self, n_mc=10000):
+
+        X = self._sample_x(n_samples=n_mc)
+
+        y = self.predict(X, return_cov=False)
+
+        mean = np.mean(y, axis=0)
+        var  = np.var(y, axis=0)
+
+        return np.squeeze(mean), np.squeeze(var)
+    
+    def sobol(self, calc_second=False, return_total=False, n_mc=1024):
+
+        # salib problem definition
+        self.sobol_problem = {}
+        self.sobol_problem['num_vars'] = self.dim
+        self.sobol_problem['names'] = [f'x{i+1}' for i in range(self.dim)]
+        self.sobol_problem['bounds'] = []
+        self.sobol_problem['dists'] = []
+
+        for _, var in enumerate(self.pdf_var):
+
+            if var == 'U':
+                self.sobol_problem['bounds'].append([-1.0, 1.0])
+                self.sobol_problem['dists'].append('unif')
+
+            elif var == 'N':
+                self.sobol_problem['bounds'].append([0.0, 1.0])
+                self.sobol_problem['dists'].append('norm') 
+
+        # saltelli sampling of inputs
+        X_sobol = saltelli.sample(self.sobol_problem, 
+                                  calc_second_order=calc_second, 
+                                  N=n_mc)
+
+        # evaluating the model
+        y_sobol = self.predict(X_sobol, return_cov=False)
+
+        # computing the sobol indices
+        s1 = np.zeros((self.dim, self.noutputs))
+        st = np.zeros((self.dim, self.noutputs))
+        if calc_second:
+            s2 = np.zeros((int(self.dim * (self.dim - 1) / 2), self.noutputs)) 
+
+        for i_out in range(self.noutputs):
+
+            s = sobol.analyze(self.sobol_problem, 
+                              y_sobol[:,i_out], 
+                              calc_second_order=calc_second,
+                              n_processors=self.nproc)
+            
+            s1[:,i_out] = s['S1']
+            st[:,i_out] = s['ST']
+            if calc_second:
+                s2[:,i_out] = s['S2']
+
+        if calc_second:
+
+            if return_total:
+                return s1, s2, st
+            else:
+                return s1, s2
+            
+        else:
+
+            if return_total:
+                return s1, st
+            else:
+                return s1
+
+    def compute_err_loo(self):
+
+        R_inv = cho_solve((self.L_, True), np.eye(self.ndata), check_finite=False)
+
+        err_loo = np.zeros((self.ndata, self.noutputs))
+
+        for i_data in range(self.ndata):
+            
+            # removing datum from matrices
+            y_loo = np.delete(self.y_train, i_data, axis=0)
+            F_loo = np.delete(self.F, i_data, axis=0)
+            R_inv_loo = np.delete(R_inv, i_data, axis=0)
+            R_inv_loo = np.delete(R_inv_loo, i_data, axis=1)
+
+            # regressor estimated without datum
+            beta_loo = inv(F_loo.T @ R_inv_loo @ F_loo) @ F_loo.T @ R_inv_loo @ y_loo
+
+            err_loo[i_data,:] = 1 / R_inv[i_data, i_data] * (R_inv @ (self.y_train - self.F @ beta_loo))[i_data,:]
+    
+        self.err_loo = err_loo
+
+        return err_loo
+    
+    def compute_err_mse(self):
+        '''
+        Mean square error computed through Leave-one-out.
+        '''
+
+        if not hasattr(self, 'err_loo'):
+            self.compute_err_loo()
+
+        self.err_mse = np.sum(self.err_loo**2, axis=0) / self.ndata
+
+        return self.err_mse
+
     def _predict_basis(self, X):
 
         nsamples, _ = X.shape
@@ -108,61 +218,6 @@ class PCKriging(PCE):
             f[:,j] = prod
 
         return f
-    
-    def moments(self, n_mc=10000):
-
-        X = self._sample_x(n_samples=n_mc)
-
-        y = self.predict(X, return_cov=False)
-
-        mean = np.mean(y)
-        var  = np.var(y)
-
-        return mean, var
-    
-    def compute_err_loo(self):
-
-        R_inv = cho_solve((self.L_, True), np.eye(self.ndata), check_finite=False)
-
-        err_loo = np.zeros(self.y_train.shape[0])
-
-        for i_data in range(self.ndata):
-            
-            # removing datum from matrices
-            y_loo = np.delete(self.y_train, i_data)
-            F_loo = np.delete(self.F, i_data, axis=0)
-            R_inv_loo = np.delete(R_inv, i_data, axis=0)
-            R_inv_loo = np.delete(R_inv_loo, i_data, axis=1)
-
-            # regressor estimated without datum
-            beta_loo = inv(F_loo.T @ R_inv_loo @ F_loo) @ F_loo.T @ R_inv_loo @ y_loo
-
-            err_loo[i_data] = 1 / R_inv[i_data, i_data] * (R_inv @ (self.y_train - self.F @ beta_loo))[i_data]
-    
-        self.err_loo = err_loo
-
-        return err_loo
-    
-    def compute_err_mse(self):
-        '''
-        Mean square error computed through Leave-one-out.
-        '''
-
-        if not hasattr(self, 'err_loo'):
-            self.compute_err_loo()
-
-        self.err_mse = np.sum(self.err_loo**2) / self.ndata
-
-        return self.err_mse
-    
-    def r2_score(self):
-
-        if not hasattr(self, 'err_mse'):
-            self.compute_err_mse()
-
-        score = 1 - self.err_mse / np.var(self.y_train)
-
-        return score
 
     def _sample_x(self, n_samples):
         '''
@@ -284,25 +339,36 @@ def log_likelihood(theta, pck, eval_gradient=False):
     temp1 = pck.F.T @ cho_solve((L, True), pck.y_train, check_finite=False)
     temp2 = pck.F.T @ cho_solve((L, True), pck.F, check_finite=False)
     beta_hat = solve(temp2, temp1, overwrite_a=True, check_finite=False)
+
     y_disc = pck.y_train - pck.F @ beta_hat
+    if y_disc.ndim == 1:
+        y_disc = y_disc[:, np.newaxis]
 
     alpha = cho_solve((L, True), y_disc, check_finite=False)
-    Q_   = y_disc.T @ alpha
+    Q_   = np.einsum("ik,ik->k", y_disc, alpha)
 
     # Computation of the marginal likelihood
-    log_like = - pck.ndata / 2 * np.log(Q_) 
-    log_like -= np.sum(np.log(np.diag(L))) 
-    log_like -= pck.ndata / 2 * (np.log(2 * np.pi / pck.ndata) + 1)
+    log_like_dims = - pck.ndata / 2 * np.log(Q_) 
+    log_like_dims -= np.sum(np.log(np.diag(L))) 
+    log_like_dims -= pck.ndata / 2 * (np.log(2 * np.pi / pck.ndata) + 1)
+    # the log likelihood is sum-up across the outputs
+    log_like = log_like_dims.sum(axis=-1)
 
     if eval_gradient :
 
         # Computation of the likelihood gradient
         # from Rasmussen & Williams, each gradient component theta_j is equal to
-        #  0.5 * trace((alpha . alpha^T - K^-1) . dK_dtheta_j)            
-        R_inv = cho_solve((L, True), np.eye(pck.ndata), check_finite=False)
-        temp3 = (pck.ndata / Q_) * np.outer(alpha, alpha) - R_inv
+        #  0.5 * trace((alpha . alpha^T - K^-1) . dK_dtheta_j)       
 
-        log_like_grad = 0.5 * np.trace(temp3 @ R_gradient)
+        inner_term = pck.ndata * np.einsum("ik,jk->ijk", alpha, alpha) / Q_.reshape(1, 1, pck.noutputs)
+        R_inv = cho_solve((L, True), np.eye(pck.ndata), check_finite=False)
+
+        inner_term -= R_inv[..., np.newaxis]
+        log_like_grad_dims = 0.5 * np.einsum(
+            "ijl,jik->kl", inner_term, R_gradient
+        )
+
+        log_like_grad = log_like_grad_dims.sum(axis=-1)
 
         return -log_like, -log_like_grad
     
