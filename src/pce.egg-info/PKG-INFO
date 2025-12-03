@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: pce
+Version: 0.1.0
+Summary: Python package for probabilistic PCE-based surrogate models
+Author-email: Alberto Perlini <alberto.perlini@polimi.it>
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: scikit-learn
