@@ -26,7 +26,7 @@ class PCKriging(PCE):
         self.nugget = nugget
         self.nproc = nproc
 
-    def training(self, X, y):
+    def training(self, X, y, method='ML'):
 
         self.ndata, _ = X.shape
             
@@ -51,7 +51,7 @@ class PCKriging(PCE):
             self.F[:,j] = prod
 
         # computing the hyperparameters mle
-        self._hyperparameters_mle()
+        self._hyperparameters_opt(method)
 
         # precomputing the fitted kernel and other matrices to perform prediction
         R = self.kernel_(self.X_train)
@@ -238,9 +238,9 @@ class PCKriging(PCE):
 
         return X
 
-    def _hyperparameters_mle(self):
+    def _hyperparameters_opt(self, method):
         """
-        Hyperparameters fitting via MLE approach. 
+        Hyperparameters fitting via MLE or CV approach. 
         L-BFGS-B are used for optimization, with a multistart approach.
         The function, beside fitting, populates the precomputed matrices needed for mono-fidelity GPs to
         perform prediction.
@@ -253,7 +253,10 @@ class PCKriging(PCE):
         multistart = max(10, nproc)
 
         # fitting method
-        loss_func = log_likelihood
+        if method == 'ML':
+            loss_func = log_likelihood
+        elif method == 'CV':
+            loss_func = loss_loo
 
         hyp_lw = self.kernel.bounds[:,0]
         hyp_up = self.kernel.bounds[:,1]   
@@ -375,6 +378,81 @@ def log_likelihood(theta, pck, eval_gradient=False):
     else:
         return -log_like
     
+
+# -------------------------------------------------------------------
+#  Loss LOOCV
+# -------------------------------------------------------------------
+
+def loss_loo(theta, pck, eval_gradient=False):
+    """
+    Function to compute the Log Likelihood of the GP and its gradient w.r.t. the hyperparameters.
+    The hyperparameters of the kernel are log-transformed.
+
+    Inputs:
+    - theta is the vector of log_transformed hyperparameters.
+    - gp is the mono-fidelity GaussianProcessRegressor object
+    - eval_gradient is a boolean that tells whether to compute the gradient or not
+
+    Outputs:
+    - -loss_loo is the negative logL 
+    - -loss_loo_grad is the negative logL gradient
+    """
+    kernel = pck.kernel
+    kernel.theta = theta
+    
+    # Kernel computation
+    if eval_gradient:
+        R, R_gradient = kernel(pck.X_train, eval_gradient=True)
+    else:
+        R = kernel(pck.X_train, eval_gradient=False)
+
+    R[np.diag_indices_from(R)] += pck.nugget
+
+    # Cholesky decomposition of the noisy covariance matrix
+    try:
+        L = cholesky(R, lower=True, check_finite=False)
+    except np.linalg.LinAlgError:
+        return (np.inf, np.zeros_like(theta)) if eval_gradient else np.inf
+
+    y_disc = pck.y_train 
+
+    alpha = cho_solve((L, True), y_disc, check_finite=False)
+    R_inv = cho_solve((L, True), np.eye(pck.ndata), check_finite=False)
+    A = R_inv**(-2) * np.eye(pck.ndata)
+
+    # Computation of the marginal likelihood
+    loss_loo_dims = np.einsum("ik,kj->ij", A, alpha)
+    loss_loo_dims = np.einsum("ik,ik->k" , alpha, loss_loo_dims)
+    # the log likelihood is sum-up across the outputs
+    loss_loo = loss_loo_dims.sum(axis=-1)
+
+    if eval_gradient :
+
+        # Computation of the loss gradient  
+
+        temp1 = np.einsum("ijk,ji->ijk", R_gradient, R_inv)     # R_gradient @ R_inv
+        temp2 = np.einsum("ij,jik->ijk", R_inv, temp1)          # R_inv @ R_gradient @ R_inv
+        temp3 = temp2 * np.repeat(np.eye(pck.ndata)[...,np.newaxis], theta.shape[0], axis=-1) # diag(R_inv @ R_gradient @ R_inv)
+        temp4 = np.repeat(2 * A[...,np.newaxis]**(3/2), theta.shape[0], axis=-1)
+         
+        A_gradient = temp4 * temp3
+
+        inner_term1 = np.einsum("ik,jk->ijk", alpha, alpha)
+
+        inner_term2 = A_gradient 
+        inner_term2 -= np.einsum("ijk,ji->ijk", R_gradient, R_inv @ A)
+        inner_term2 -= np.einsum("ij,jik->ijk", R_inv @ A, R_gradient)
+
+        loss_loo_grad_dims = np.einsum(
+            "ijl,jik->kl", inner_term1, inner_term2
+        )
+
+        loss_loo_grad = loss_loo_grad_dims.sum(axis=-1)
+
+        return -loss_loo, -loss_loo_grad
+    
+    else:
+        return -loss_loo
 
 # -------------------------------------------------------------------
 #  Utilities

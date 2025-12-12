@@ -1,5 +1,6 @@
 pyproject.toml
 src/pce/__init__.py
+src/pce/augpce.py
 src/pce/doe.py
 src/pce/isomap.py
 src/pce/pce.py
