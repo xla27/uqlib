@@ -14,6 +14,14 @@ class PCE():
     pdf_types = ['U', 'N', 'G', 'B']
 
     def __init__(self, dim, degree, pdf_var, truncation):
+        '''
+        Inputs:
+        - dim -> dimensionality of the input random space
+        - degree -> degree of the PCE
+        - pdf_var -> list of the PDF of each random input ('U','N','G','B')
+        - truncation -> dictionary with the truncation method ('standard', 'rank','hyperbolic')
+                        and additional parameters ('rank', 'q')
+        '''
 
         self.dim = dim        # size of input domain
         self.deg = degree     # maximum degree of polynomials
