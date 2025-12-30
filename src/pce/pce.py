@@ -74,9 +74,10 @@ class PCE():
         self.X_train = X
         self.y_train = y
 
-        if method == 'LSQ':
+        if method == 'LSQ' or method == 'LSQ-W':
 
             self.A = np.zeros((self.ndata, len(self.multindices)))
+            self.W = np.zeros((self.ndata, self.ndata))
 
             for j, poly in enumerate(self.polynomials):
 
@@ -86,16 +87,21 @@ class PCE():
                 
                 self.A[:,j] = prod
 
-            ATA = self.A.T @ self.A
-            ATAinv = cho_solve((cho_factor(ATA)),
+            if method == 'LSQ-W':
+                self.W = np.diag(self.ndata / np.sum(self.A**2, axis=1))
+            else:
+                self.W = np.eye(self.ndata)
+
+            ATWA = self.A.T @ self.W @ self.A
+            ATWAinv = cho_solve((cho_factor(ATWA)),
                                 np.eye(len(self.multindices)),
                                 check_finite=False)
 
             # coeffs = (npoly x noutputs) array
-            self.coeffs = ATAinv @ self.A.T @ self.y_train   
+            self.coeffs = ATWAinv @ self.A.T @ self.W @ self.y_train   
 
             # utilitiess for loo
-            h_loo = np.diag(self.A @ ATAinv @ self.A.T)
+            h_loo = np.diag(self.A @ ATWAinv @ self.A.T @ self.W)
             utility_loo = np.ones(h_loo.shape) - h_loo
             self.h_loo = h_loo
             self.utility_loo = np.repeat(utility_loo[:,np.newaxis], repeats=self.noutputs, axis=1)
