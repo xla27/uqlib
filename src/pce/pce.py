@@ -114,7 +114,7 @@ class PCE():
             self.h_loo = h_loo
             self.utility_loo = np.repeat(utility_loo[:,np.newaxis], repeats=self.noutputs, axis=1)
 
-        elif method == 'PROJ':
+        elif method == 'QUAD':
 
             if weights is None:
 
