@@ -9,8 +9,7 @@ import pickle as pkl
 import itertools
 
 import numpy          as np
-from scipy.stats    import qmc
-from scipy.spatial.distance import cdist
+from scipy.stats    import qmc, norm, uniform
 from scipy.special import roots_legendre, roots_hermitenorm, roots_genlaguerre
 from sklearn.preprocessing import FunctionTransformer
 
@@ -22,7 +21,7 @@ class DoE():
     '''
     Class for performing the nested DoE structure for multifidelity kriging (Le Gratiet formulation)
     '''
-    methods = ['MC', 'QUADRATURE']
+    methods = ['MC', 'LHS', 'QUADRATURE']
     pdf_types = ['U', 'N', 'G', 'B']
 
     def __init__(self, dim, method, pdf_var):
@@ -47,9 +46,17 @@ class DoE():
             raise NotImplementedError('Beta distribution not yet implemented')
         
     def __call__(self, **kwargs):
+        '''
+        Method for generating samples.
+        If sampling method MC or LHS use "ndata=".
+        If quadrature method use "point_per_dim=".
+        '''
 
         if self.method == 'MC':
             X, w = self._generate_mc(ndata=kwargs['ndata'])
+
+        if self.method == 'LHS':
+            X, w = self._generate_lhs(ndata=kwargs['ndata'])
 
         elif self.method == 'QUADRATURE':
             X, w = self._generate_quad(point_per_dim=kwargs['point_per_dim'])
@@ -60,12 +67,7 @@ class DoE():
         return X, w
 
     def _generate_mc(self, ndata):
-        '''
-        Output
-        - xdata is an array containing all the sampling locations
-        - datalevel is a matrix o f zeros and ones telling which fidelity level should be sampled
-          at a given location
-        '''
+
         X = np.empty((ndata,0))
         w = np.ones(ndata)
 
@@ -77,6 +79,26 @@ class DoE():
 
             elif pdf == 'N':
                 x_n = np.random.normal(0, 1, size=(ndata,1))
+                X = np.hstack((X, x_n))
+
+        return X, w
+    
+    def _generate_lhs(self, ndata):
+
+        X = np.empty((ndata,0))
+        w = np.ones(ndata)
+
+        sampler = qmc.LatinHypercube(self.dim)
+        X_01 = sampler.random(ndata)
+        
+        for i_pdf, pdf in enumerate(self.pdf_var):
+
+            if pdf == 'U':
+                x_u = uniform.ppf(X_01[:,i_pdf], loc=-1, scale=2)
+                X = np.hstack((X, x_u))
+
+            elif pdf == 'N':
+                x_n = norm.ppf(X_01[:,i_pdf])
                 X = np.hstack((X, x_n))
 
         return X, w
