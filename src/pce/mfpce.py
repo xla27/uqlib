@@ -36,7 +36,7 @@ class MFPCE():
         
         if isinstance(truncations, list) and len(truncations) == nlevels:      
             self.truncations = truncations
-        elif not isinstance(degrees, list):
+        elif not isinstance(truncations, list):
             self.truncations = [truncations] * nlevels
         else:
             raise KeyError('Wrong truncation schemes specification')
@@ -49,7 +49,7 @@ class MFPCE():
 
         return
 
-    def compute_coeffs(self, doe):
+    def compute_coeffs(self, doe, method):
         """
         doe is a NestedDoE object
 
@@ -63,7 +63,14 @@ class MFPCE():
                                    self.truncations[0]))
         
         X_train, y_train = doe.level(0, return_y=True)
-        pce_lf = pce_lf.compute_coeffs(X_train, y_train, method='LSQ')
+
+        if y_train.ndim == 1:
+            self.noutputs = 1
+            y_train = y_train[:,np.newaxis]
+        else:
+            _, self.noutputs = y_train.shape
+
+        pce_lf.compute_coeffs(X_train, y_train, method=method)
         
         for i_lev in range(1, self.nlevels):
 
@@ -76,12 +83,15 @@ class MFPCE():
             X_train, y_train = doe.level(i_lev, return_y=True)
 
             # discrepancy wrt lower PCE prediction
-            y_train = y_train - pce_lf.predict(X_train)
+            y_lf = pce_lf.predict(X_train)
+            if self.noutputs == 1: 
+                y_lf = y_lf[:,np.newaxis]
+            disc_train = y_train - y_lf
 
-            pce_i.compute_coeffs(X_train, y_train, method='LSQ')
+            pce_i.compute_coeffs(X_train, disc_train, method=method)
 
             # updating the pce_lf
-            self._update_pce(pce_lf, pce_i)
+            pce_lf = self._update_pce(pce_lf, pce_i)
 
         # assigning the correct attributes
         self.multindices = pce_lf.multindices
@@ -193,7 +203,7 @@ class MFPCE():
         for a, ya in zip(multindices_lf, coeffs_lf):
             key = tuple(a)
             if key in acc:
-                acc[key] += ya
+                acc[key] += ya.copy()
             else:
                 acc[key] = ya.copy()   
 
@@ -202,7 +212,7 @@ class MFPCE():
         for b, yb in zip(multindices_i, coeffs_i):
             key = tuple(b)
             if key in acc:
-                acc[key] += yb
+                acc[key] += yb.copy()
             else:
                 acc[key] = yb.copy()  
 
@@ -230,7 +240,7 @@ class MFPCE():
                 
             polynomials.append(poly)
         
-        pce_lf.polynomials = polynomials
-        pce_lf.coeffs      = np.stack(acc.values())
+        pce_lf.polynomials = polynomials        
+        pce_lf.coeffs      = np.array([val for val in acc.values()])
 
         return pce_lf
