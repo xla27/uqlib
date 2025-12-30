@@ -95,11 +95,11 @@ class DoE():
         for i_pdf, pdf in enumerate(self.pdf_var):
 
             if pdf == 'U':
-                x_u = uniform.ppf(X_01[:,i_pdf], loc=-1, scale=2)
+                x_u = uniform.ppf(X_01[:,i_pdf], loc=-1, scale=2)[:,np.newaxis]
                 X = np.hstack((X, x_u))
 
             elif pdf == 'N':
-                x_n = norm.ppf(X_01[:,i_pdf])
+                x_n = norm.ppf(X_01[:,i_pdf])[:,np.newaxis]
                 X = np.hstack((X, x_n))
 
         return X, w
@@ -166,7 +166,7 @@ class NestedDoE(DoE):
             sampler = self._generate_lhs
         
         # building the HF DoE 
-        X_hf = sampler(ndata=self.ndata_per_level[-1])
+        X_hf = sampler(ndata=self.ndata_per_level[-1])[0]
         
         # initializing the DoE dictionary
         DL = np.ones((self.ndata_per_level[-1], self.nlevel))
@@ -177,23 +177,23 @@ class NestedDoE(DoE):
         for t in reversed(range(self.nlevel-1)):
 
             # sampling t DoE
-            tf_doe = sampler(ndata=self.ndata_per_level[t])
+            X_tf = sampler(ndata=self.ndata_per_level[t])[0]
             
             for i in range(X_hf.shape[0]):
 
                 x_i = X_hf[i,:]
-                dist = cdist(tf_doe, x_i.reshape(1, self.dim), metric='euclidean')
+                dist = cdist(X_tf, x_i.reshape(1, self.dim), metric='euclidean')
                 # removing from tf_doe the point closest to x_i, a point already in the doe
-                tf_doe = np.delete(tf_doe, np.argmin(np.squeeze(dist)), 0)
+                X_tf = np.delete(X_tf, np.argmin(np.squeeze(dist)), 0)
 
-            X_hf = np.append(X_hf, tf_doe, axis=0)
+            X_hf = np.append(X_hf, X_tf, axis=0)
 
             # updating the location matrix
-            X = np.append(X, tf_doe, axis=0)
+            X = np.append(X, X_tf, axis=0)
 
             # updating the level matrix
             DL_t = np.array([1]*(t + 1) + [0]*(self.nlevel - 1 - t))
-            DL_t = np.repeat(DL_t.reshape(1, self.nlevel), tf_doe.shape[0], axis=0)
+            DL_t = np.repeat(DL_t.reshape(1, self.nlevel), X_tf.shape[0], axis=0)
             DL = np.append(DL, DL_t, axis=0)
 
         self.X = X
