@@ -120,17 +120,23 @@ class PCE():
 
                 raise ValueError('Provide weights for Gaussian quadrature!')
             
-            self.coeffs = np.zeros(len(self.polynomials))
+            else:
 
-            yw = self.y_train * weights
+                weights = np.repeat(weights[:,np.newaxis], self.noutputs, axis=1)
+            
+            self.coeffs = np.zeros((len(self.polynomials), self.noutputs))
+
+            yw = weights * self.y_train 
 
             for j, poly in enumerate(self.polynomials): 
 
                 prod = 1
                 for k, p in enumerate(poly):
                     prod *= p(X[:,k])
+                
+                prod = np.repeat(prod[:,np.newaxis], self.noutputs, axis=1)
 
-                self.coeffs[j,:] = np.sum(yw * prod, axis=0)
+                self.coeffs[j,:] = np.sum(prod * yw, axis=0)
 
     def moments(self):
         '''
