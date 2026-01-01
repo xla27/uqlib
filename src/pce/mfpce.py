@@ -1,5 +1,3 @@
-import os, sys, shutil, copy
-
 import numpy as np
 
 from itertools import product, combinations
@@ -57,10 +55,10 @@ class MFPCE():
         """
 
         # training the lowest level PCE
-        pce_lf = copy.deepcopy(PCE(self.dim, 
-                                   self.degs[0],
-                                   self.pdf_var, 
-                                   self.truncations[0]))
+        pce_lf = PCE(self.dim, 
+                    self.degs[0],
+                    self.pdf_var, 
+                    self.truncations[0])
         
         X_train, y_train = doe.level(0, return_y=True)
 
@@ -74,18 +72,21 @@ class MFPCE():
         
         for i_lev in range(1, self.nlevels):
 
-            pce_i = copy.deepcopy(PCE(self.dim, 
-                                    self.degs[i_lev],
-                                    self.pdf_var, 
-                                    self.truncations[i_lev]))
+            pce_i = PCE(self.dim, 
+                        self.degs[i_lev],
+                        self.pdf_var, 
+                        self.truncations[i_lev])
 
             # extracting the data
             X_train, y_train = doe.level(i_lev, return_y=True)
 
             # discrepancy wrt lower PCE prediction
             y_lf = pce_lf.predict(X_train)
+
             if self.noutputs == 1: 
                 y_lf = y_lf[:,np.newaxis]
+                y_train = y_train[:,np.newaxis]
+
             disc_train = y_train - y_lf
 
             pce_i.compute_coeffs(X_train, disc_train, method=method)
@@ -93,7 +94,7 @@ class MFPCE():
             # updating the pce_lf
             pce_lf = self._update_pce(pce_lf, pce_i)
 
-        # assigning the correct attributes
+        # assigning the correct attributes (multindices, polynomials and coefficients)
         self.multindices = pce_lf.multindices
         self.polynomials = pce_lf.polynomials
         self.coeffs      = pce_lf.coeffs            
@@ -195,9 +196,13 @@ class MFPCE():
         return s / (V + np.finfo(float).eps)
     
     def _update_pce(self, pce_lf, pce_i):
-
+        """
+        Updating the lower fidelity PCE with the additive correction.
+        The update involves multindices, polynomials and coefficients.
+        """
         acc = {}
 
+        # finding the union of the multindices sets and of the corresponding coeffs
         multindices_lf = pce_lf.multindices
         coeffs_lf = [pce_lf.coeffs[i,:] for i in range(pce_lf.coeffs.shape[0])]
         for a, ya in zip(multindices_lf, coeffs_lf):
@@ -217,8 +222,9 @@ class MFPCE():
                 acc[key] = yb.copy()  
 
         pce_lf.multindices = [list(k) for k in acc.keys()]
+        pce_lf.coeffs      = np.array([val for val in acc.values()])
 
-        # polynomial bases
+        # updating the polynomial bases according to the new multindices set
         polynomials = []
         for j, indices in enumerate(pce_lf.multindices):
 
@@ -241,6 +247,5 @@ class MFPCE():
             polynomials.append(poly)
         
         pce_lf.polynomials = polynomials        
-        pce_lf.coeffs      = np.array([val for val in acc.values()])
 
         return pce_lf
