@@ -40,6 +40,9 @@ class PCE():
         elif truncation['method'] == 'hyperbolic':
             self.multindices = trunc_hyper(self.dim, self.deg, truncation['q'])
 
+        print('PCE surrogate with %i inputs, %i degree, %i cardinality' %
+              (self.dim, self.deg, len(self.multindices)))
+
         # polynomial bases
         self.polynomials = []
         for j, indices in enumerate(self.multindices):

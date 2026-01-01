@@ -11,15 +11,16 @@ import itertools
 import numpy          as np
 from scipy.stats    import qmc, norm, uniform
 from scipy.special import roots_legendre, roots_hermitenorm, roots_genlaguerre
+from scipy.spatial.distance import cdist
 from sklearn.preprocessing import FunctionTransformer
 
 # -------------------------------------------------------------------
-#  Nested DOE class (Le Gratiet algorithm)
+#  DOE class
 # -------------------------------------------------------------------
 
 class DoE():
     '''
-    Class for performing the nested DoE structure for multifidelity kriging (Le Gratiet formulation)
+    Class for performing DoE sampling
     '''
     methods = ['MC', 'LHS', 'QUADRATURE']
     pdf_types = ['U', 'N', 'G', 'B']
@@ -61,7 +62,7 @@ class DoE():
         elif self.method == 'QUADRATURE':
             X, w = self._generate_quad(point_per_dim=kwargs['point_per_dim'])
 
-        self.xdata = X
+        self.X = X
         self.weights = w
 
         return X, w
@@ -94,11 +95,11 @@ class DoE():
         for i_pdf, pdf in enumerate(self.pdf_var):
 
             if pdf == 'U':
-                x_u = uniform.ppf(X_01[:,i_pdf], loc=-1, scale=2)
+                x_u = uniform.ppf(X_01[:,i_pdf], loc=-1, scale=2)[:,np.newaxis]
                 X = np.hstack((X, x_u))
 
             elif pdf == 'N':
-                x_n = norm.ppf(X_01[:,i_pdf])
+                x_n = norm.ppf(X_01[:,i_pdf])[:,np.newaxis]
                 X = np.hstack((X, x_n))
 
         return X, w
@@ -128,11 +129,143 @@ class DoE():
         '''
         Setting the list of evaluation arrays of the DOE locations.
         '''
-        if hasattr(self, 'ydata'):
+        if hasattr(self, 'y'):
             raise AttributeError('The DOE has already been evaluated, if you want to append other observations' \
             'use the the update() method!')
         else:
-            self.ydata = y
+            self.y = y
+    
+
+# -------------------------------------------------------------------
+#  Nested DOE class (Le Gratiet algorithm)
+# -------------------------------------------------------------------
+
+class NestedDoE(DoE):
+    '''
+    Class for performing the nested DoE structure
+    '''
+    methods = ['MC', 'LHS']
+    pdf_types = ['U', 'N', 'G', 'B']
+
+    def __call__(self, ndata_per_level):
+        '''
+        Output
+        - X is an array containing all the sampling locations
+        - DL is a matrix o f zeros and ones telling which fidelity level should be sampled
+          at a given location
+        '''
+
+        self.ndata_per_level = ndata_per_level
+        self.nlevel = len(ndata_per_level)
+
+        # obtaining the sampling function
+        if self.method == 'MC':
+            sampler = self._generate_mc
+
+        if self.method == 'LHS':
+            sampler = self._generate_lhs
+        
+        # building the HF DoE 
+        X_hf = sampler(ndata=self.ndata_per_level[-1])[0]
+        
+        # initializing the DoE dictionary
+        DL = np.ones((self.ndata_per_level[-1], self.nlevel))
+        X = X_hf
+
+        # cycling on all the levels, the level's DoE is generated and then the points closest to the higher DoE
+        # are removed. Then, the DoE are put together
+        for t in reversed(range(self.nlevel-1)):
+
+            # sampling t DoE
+            X_tf = sampler(ndata=self.ndata_per_level[t])[0]
+            
+            for i in range(X_hf.shape[0]):
+
+                x_i = X_hf[i,:]
+                dist = cdist(X_tf, x_i.reshape(1, self.dim), metric='euclidean')
+                # removing from tf_doe the point closest to x_i, a point already in the doe
+                X_tf = np.delete(X_tf, np.argmin(np.squeeze(dist)), 0)
+
+            X_hf = np.append(X_hf, X_tf, axis=0)
+
+            # updating the location matrix
+            X = np.append(X, X_tf, axis=0)
+
+            # updating the level matrix
+            DL_t = np.array([1]*(t + 1) + [0]*(self.nlevel - 1 - t))
+            DL_t = np.repeat(DL_t.reshape(1, self.nlevel), X_tf.shape[0], axis=0)
+            DL = np.append(DL, DL_t, axis=0)
+
+        self.X = X
+        self.DL = DL
+
+        return X, DL
+    
+    def level(self, level, return_y=True):
+        '''
+        Method to return the DOE at the desired level
+
+        Input:
+        - level, int indicating the required level
+
+        Outputs:
+        - x (ndata[level], dim) array
+        - y (ndata[level],) array
+        '''
+        if not isinstance(level, int):
+            raise ValueError('Integer required as input')
+        
+        if level > (self.nlevel - 1):
+            raise ValueError('The required level is higher than the highest level of the DOE')
+        
+        i_datalevel = self.DL[:,level]
+        X = self.X[i_datalevel == 1, :]
+        if not return_y:
+            return X
+        else:
+            y = self.y[level]
+            return X, y
+    
+    def nestedlevel(self, level_high, level_low):
+        '''
+        Method to return the nested DOE at the desired levels i.e., the outuputs at the required levels at common design points x.
+
+        Input:
+        - level_high, the higher level
+        - level_low, the lower level
+
+        Outputs:
+        - x_nested (ndata[level_high], dim) array
+        - y_nested (ndata[level_high], 2) array with [:,0] indicating lower level outputs and [:,1] higher level outputs
+        '''
+        if not isinstance(level_high, int) or not isinstance(level_low, int):
+            raise ValueError('Integers required as input')
+        
+        if level_high > (self.nlevel - 1):
+            raise ValueError('The required level is higher than the highest level of the DOE')  
+        
+        if level_low >= level_high:
+            raise ValueError('Lower level input is higher than the higher level input')
+        
+        X_nested, y_high = self.level(level_high)
+
+        i_datalevel = self.DL[:,level_high]
+
+        ndata, _ = X_nested.shape
+        
+        y_low = np.array([])
+        k_low = 0
+        for j in range(i_datalevel.size):
+            if i_datalevel[j] == 1:
+                y_low = np.append(y_low, self.y[level_low][k_low])
+                k_low += 1
+            elif i_datalevel[j] != self.DL[j,level_low]:
+                k_low += 1
+
+        y_nested = np.hstack(( y_low.reshape(ndata,1), 
+                              y_high.reshape(ndata,1)))
+
+        return X_nested, y_nested
     
 
 # -------------------------------------------------------------------
