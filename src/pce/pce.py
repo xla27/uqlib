@@ -141,6 +141,13 @@ class PCE():
 
                 self.coeffs[j,:] = np.sum(prod * yw, axis=0)
 
+        # computing a prediction on the training set (useful to be stored)
+        X_train_predict = self.predict(self.X_train)
+        if self.noutputs == 1:
+            self.X_train_predict = X_train_predict[:,np.newaxis]
+        else:
+            self.X_train_predict = X_train_predict
+
     def moments(self):
         '''
         mean, var are (noutputs,) arrays
@@ -243,7 +250,7 @@ class PCE():
         M^{PC-i} = ( M^{PC}(x^{(i)}) - h_i M(x^{(i)} ) / ( 1 - h_i )
         '''
         h_loo = np.repeat(self.h_loo[:,np.newaxis], repeats=self.noutputs, axis=1)
-        loo_predict = (self.predict(self.X_train) - h_loo * self.y_train) / self.utility_loo
+        loo_predict = (self.X_train_predict - h_loo * self.y_train) / self.utility_loo
 
         return np.squeeze(loo_predict)
 
@@ -251,7 +258,7 @@ class PCE():
         '''
         L1 error computed through Leave-one-out.
         '''
-        err_l1 = np.sum(np.abs((self.y_train - self.predict(self.X_train))/ self.utility_loo), axis=0)
+        err_l1 = np.sum(np.abs((self.y_train - self.X_train_predict)/ self.utility_loo), axis=0)
 
         self.err_l1 = np.squeeze(err_l1)
 
@@ -261,7 +268,7 @@ class PCE():
         '''
         L2 error computed through Leave-one-out.
         '''
-        err_l2 = np.sum(((self.y_train - self.predict(self.X_train))/ self.utility_loo)**2, axis=0)
+        err_l2 = np.sum(((self.y_train - self.X_train_predict)/ self.utility_loo)**2, axis=0)
 
         self.err_l2 = np.squeeze(err_l2)
 
