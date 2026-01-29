@@ -57,7 +57,7 @@ class PCE():
                 elif self.pdf_var[k] == 'N':
                     poly.append(hermite_norm(idx))
 
-                elif self.type[k] == 'G':
+                elif self.pdf_var[k] == 'G':
                     raise KeyError('Laguerre polynomials for Gamma distribution not yet implemented')
                 
                 elif self.pdf_var[k] == 'B':
