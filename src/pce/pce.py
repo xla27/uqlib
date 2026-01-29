@@ -161,10 +161,11 @@ class PCE():
 
         return np.squeeze(mean), np.squeeze(var)
     
-    def predict(self, X):
+    def predict(self, X, eval_gradient=False):
         """
         X is a (nsamples, dim) numpy.array of inputs
         y is a (nsamples, noutputs) numpy.array of predictions
+        grad is a (nsamples, noutputs, ndim) numpy.array of the PCE gradient for given sample for given output
         """
 
         if not self.coeffs.any():
@@ -172,18 +173,36 @@ class PCE():
 
         nsamples, _ = X.shape
         
-        y = np.zeros((nsamples, self.noutputs))
+        y    = np.zeros((nsamples, self.noutputs))
+        grad = np.zeros((nsamples, self.dim, self.noutputs))
 
         for j, poly in enumerate(self.polynomials):
 
-            prod = 1
-            for k, p in enumerate(poly):
-                prod *= p(X[:,k])
-            
-            y += (np.repeat(self.coeffs[j,:][np.newaxis,:], repeats=nsamples, axis=0) * 
-                  np.repeat(prod[:,np.newaxis], repeats=self.noutputs, axis=1))
+            grad_j = np.zeros((nsamples, self.dim))
+            prod_j = 1
 
-        return np.squeeze(y)     
+            for k, p in enumerate(poly):
+                poly_k  = p(X[:,k])
+                prod_j *= poly_k
+
+                if eval_gradient:
+                    grad_k  = np.polyder(p)(X[:,k])
+                    grad_j[:,k] = grad_k/poly_k
+
+            coeffs_j = np.repeat(self.coeffs[j,:][np.newaxis,:], repeats=nsamples, axis=0)
+            
+            y += (coeffs_j * np.repeat(prod_j[:,np.newaxis], repeats=self.noutputs, axis=1))
+
+            if eval_gradient:
+                grad_j *= np.repeat(prod_j[:,np.newaxis], repeats=self.dim, axis=1)
+                grad += (np.repeat(coeffs_j[:,np.newaxis,:], repeats=self.dim, axis=1) * 
+                    np.repeat(grad_j[...,np.newaxis], repeats=self.noutputs, axis=2))
+
+        if eval_gradient:
+            return np.squeeze(y), np.squeeze(grad)
+        
+        else:
+            return np.squeeze(y)      
     
     def sobol_first(self):
         """
