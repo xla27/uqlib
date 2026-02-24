@@ -70,7 +70,7 @@ class GaussianProcess():
         '''
 
         # Cholesky decomposition of the noisy covariance matrix - Faster computation without matrix inversion
-        self.L     = np.linalg.cholesky(K + self.tych**2 * np.eye(self.ndata))
+        self.L     = np.linalg.cholesky(K + self.tych * np.eye(self.ndata))
         self.alpha = cho_solve((self.L, True), 
                                self.y_norm, 
                                check_finite=False)
@@ -240,7 +240,7 @@ def logmarglike(theta, gp, eval_gradient=False):
     K, K_gradient = gp.kernel(gp.x, eval_gradient=True)
 
     # Cholesky decomposition of the noisy covariance matrix
-    K     = K + gp.tych**2 * np.eye(gp.ndata)                 # Tychonov regularization
+    K     = K + gp.tych * np.eye(gp.ndata)                 # Tychonov regularization
     L     = cholesky(K, lower=True, overwrite_a=True, check_finite=False)
     # from Rasmussen & Williams:
     # alpha = L^T \ (L \ y)
