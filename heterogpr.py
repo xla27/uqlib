@@ -9,7 +9,7 @@ os.environ["OMP_NUM_THREADS"] = "1"
 os.environ['OPENBLAS_NUM_THREADS'] = "1"
 
 import numpy          as np
-from scipy.optimize import minimize, direct
+from scipy.optimize import minimize
 from scipy.linalg   import cholesky, cho_solve, solve_triangular
 from scipy.stats    import qmc
 
@@ -259,8 +259,14 @@ def neg_elbo(theta, gp, eval_gradient=False):
     LAMBDA            = np.diag(theta[(gp.n_hyp_kerf + gp.n_hyp_kerg + 1) : ])
 
     # Kernel computations
-    KF = gp.kernel_f(gp.x) + gp.tych * np.eye(gp.ndata) 
-    KG = gp.kernel_g(gp.x) + gp.tych * np.eye(gp.ndata) 
+    if eval_gradient:
+        KF, dKF = gp.kernel_f(gp.x, eval_gradient=True)  
+        KG, dKG = gp.kernel_g(gp.x, eval_gradient=True) 
+    else:
+        KF = gp.kernel_f(gp.x) 
+        KG = gp.kernel_g(gp.x) 
+    KF += gp.tych * np.eye(gp.ndata) 
+    KG += gp.tych * np.eye(gp.ndata) 
 
     # computing mu, Sigma of N(g|mu, Sigma)
     mu = mu_0 * np.ones(gp.ndata) + KG @ ( LAMBDA - 0.5 * np.eye(gp.ndata) ) @ np.ones(gp.ndata)
@@ -282,11 +288,71 @@ def neg_elbo(theta, gp, eval_gradient=False):
     # 3rd contribution KL( N(g|mu, Sigma) || N(g|mu_0 * 1, KG) )
     elbo -= kl_div_normals(mu, Sigma, mu_0 * np.ones(gp.ndata), KG)
 
-    if eval_gradient == False:
+    if not eval_gradient:
         return - elbo
 
-    if eval_gradient == True:
-        raise ValueError('Gradient not yet implemented!')
+    if eval_gradient:
+
+        elbo_grad = np.zeros_like(theta)
+
+        # gradient w.r.t. hyperpar of theta_f
+        KFR_inv = cho_solve((L_KFR, True), np.eye(gp.ndata), check_finite=False)
+        inner_term1 = (alpha @ alpha.T - KFR_inv)
+        elbo_grad[ : gp.n_hyp_kerf] = 1/2 * np.einsum("ij,jik->k", inner_term1, dKF)
+
+        # gradients of mu and sigma 
+        # order (theta_g, mu0, lambda)
+        inner_term2 = ( LAMBDA - 0.5 * np.eye(gp.ndata) ) @ np.ones(gp.ndata)
+        dmu_dthetag = np.einsum("ijk,j->ik", dKG, inner_term2)
+        dmu_dlambda = KG
+
+        inner_term3 = KGINV @ Sigma
+        temp1 = np.einsum("ijl,jk->ikl", dKG, inner_term3)
+        dSigma_dthetag = np.einsum("ji,jkl->ikl", inner_term3, temp1)
+        dSigma_dlambda = - np.einsum('ji,ik->jki', Sigma, Sigma)
+
+        # gradient of R
+        idx = np.arange(gp.ndata)
+        inner_term4 = np.exp( mu - 0.5 * np.diag( Sigma ) )
+        dRfull_dthetag = np.einsum('i,jk->ijk', inner_term4, dmu_dthetag - 0.5 * np.diagonal(dSigma_dthetag).T)
+        dR_dthetag = np.zeros_like(dRfull_dthetag)
+        dR_dthetag[idx, idx, :] = dRfull_dthetag[idx, idx, :]
+        
+        dR_dmu0 = R[...,np.newaxis]
+
+        dRfull_dlambda = np.einsum('i,jk->ijk', inner_term4, dmu_dlambda - 0.5 * np.diagonal(dSigma_dlambda).T)
+        dR_dlambda = np.zeros_like(dRfull_dlambda)
+        dR_dlambda[idx, idx, :] = dRfull_dlambda[idx, idx, :]
+
+        # gradient of -1/4 * tr(Sigma)
+        dtr_dthetag = - 1/4 * np.einsum('iij', dSigma_dthetag)
+        dtr_dlambda = - 1/4 * np.einsum('iij', dSigma_dlambda)
+
+        # gradient of the KL divergence
+        Sigma_inv = np.linalg.inv(Sigma)
+        dkl_dthetag = - 1/2 * np.einsum('ij,jik->k', KGINV, dKG)
+        dkl_dthetag += 1/2 * np.einsum('ij,jik->k', Sigma_inv, dSigma_dthetag)
+        dkl_dthetag -= 1/2 * np.einsum('ij,jik->k', KGINV, dSigma_dthetag - np.einsum('ijl,jk->ikl', dKG, KGINV @ Sigma))
+        dkl_dthetag -= 1/2 * np.einsum('i,ij->j', (( LAMBDA - 1/2 * np.eye(gp.ndata) ) @ np.ones(gp.ndata)).T, 
+                                      np.einsum('ijk,i', dKG, ( LAMBDA - 1/2 * np.eye(gp.ndata) ) @ np.ones(gp.ndata)) )
+        
+        dkl_dlambda = + 1/2 * np.einsum('ij,jik->k', Sigma_inv, dSigma_dlambda)
+        dkl_dlambda -= 1/2 * np.einsum('ij,jik->k', KGINV, dSigma_dlambda)
+        dkl_dlambda -= 1/2 * np.ones(gp.ndata) * (KG @ ( LAMBDA - 0.5 * np.eye(gp.ndata) ) @ np.ones(gp.ndata))
+        dkl_dlambda -= 1/2 * np.einsum('j,ij', np.ones(gp.ndata), ( LAMBDA - 0.5 * np.eye(gp.ndata) ) @ KG)
+
+        # gradient w.r.t. theta_g
+        elbo_grad[gp.n_hyp_kerf : (gp.n_hyp_kerf + gp.n_hyp_kerg)] = 0.5 * np.einsum("ij,jik->k", inner_term1, dR_dthetag)
+        elbo_grad[gp.n_hyp_kerf : (gp.n_hyp_kerf + gp.n_hyp_kerg)] += dtr_dthetag + dkl_dthetag
+
+        # gradient w.r.t. mu_0
+        elbo_grad[(gp.n_hyp_kerf + gp.n_hyp_kerg)] = 0.5 * np.einsum("ij,jik->k", inner_term1, dR_dmu0)
+
+        # gradient w.r.t. lambda        
+        elbo_grad[(gp.n_hyp_kerf + gp.n_hyp_kerg + 1):] = 0.5 * np.einsum("ij,jik->k", inner_term1, dR_dlambda)
+        elbo_grad[(gp.n_hyp_kerf + gp.n_hyp_kerg + 1):] += dtr_dlambda + dkl_dlambda
+
+        return - elbo, - elbo_grad
     
 
 def kl_div_normals(mu_1, Sigma_1, mu_2, Sigma_2):
