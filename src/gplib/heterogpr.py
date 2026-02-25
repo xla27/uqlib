@@ -131,7 +131,7 @@ class HeteroscedasticGaussianProcess():
         return
     
     def set_noise_scale_bounds(self, lb=1e-6, ub=1e-2):
-        self.noise_scale_bounds = np.array([lb, ub])
+        self.noise_scale_bounds = np.array([np.log10(lb), np.log10(ub)])
     
 
 # -------------------------------------------------------------------
@@ -161,7 +161,7 @@ def hetero_model_fitting(gp, x, y, multistart=10):
     hyp_lw = gp.kernel_f.bounds[:,0];                     hyp_up = gp.kernel_f.bounds[:,1] 
     hyp_lw = np.append(hyp_lw, gp.kernel_g.bounds[:,0]);  hyp_up = np.append(hyp_up, gp.kernel_g.bounds[:,1])
     hyp_lw = np.append(hyp_lw, gp.noise_scale_bounds[0]); hyp_up = np.append(hyp_up, gp.noise_scale_bounds[1])
-    hyp_lw = np.append(hyp_lw, np.zeros(gp.ndata));       hyp_up = np.append(hyp_up, 1 * np.ones(gp.ndata)); 
+    hyp_lw = np.append(hyp_lw, np.zeros(gp.ndata));       hyp_up = np.append(hyp_up, 10 * np.ones(gp.ndata)); 
 
     gp.hyp_lw = hyp_lw
     gp.hyp_up = hyp_up
@@ -197,7 +197,7 @@ def hetero_model_fitting(gp, x, y, multistart=10):
 
     gp.kernel_f.theta = opt_theta_tuple[np.nanargmin(opt_func)][ : gp.n_hyp_kerf]
     gp.kernel_g.theta = opt_theta_tuple[np.nanargmin(opt_func)][gp.n_hyp_kerf : (gp.n_hyp_kerf + gp.n_hyp_kerg)]
-    gp.mu_0           = opt_theta_tuple[np.nanargmin(opt_func)][(gp.n_hyp_kerf + gp.n_hyp_kerg)]
+    gp.mu_0           = 10**(opt_theta_tuple[np.nanargmin(opt_func)][(gp.n_hyp_kerf + gp.n_hyp_kerg)])
     gp.LAMBDA         = np.diag( opt_theta_tuple[np.nanargmin(opt_func)][(gp.n_hyp_kerf + gp.n_hyp_kerg+1) : ])
 
 
@@ -265,7 +265,7 @@ def neg_elbo(theta, gp, eval_gradient=False):
 
     gp.kernel_f.theta = theta[ : gp.n_hyp_kerf]
     gp.kernel_g.theta = theta[gp.n_hyp_kerf : (gp.n_hyp_kerf + gp.n_hyp_kerg)]
-    mu_0              = theta[(gp.n_hyp_kerf + gp.n_hyp_kerg)]
+    mu_0              = 10**theta[(gp.n_hyp_kerf + gp.n_hyp_kerg)]
     LAMBDA            = np.diag(theta[(gp.n_hyp_kerf + gp.n_hyp_kerg + 1) : ])
 
     # Kernel computations
@@ -356,7 +356,7 @@ def neg_elbo(theta, gp, eval_gradient=False):
         elbo_grad[gp.n_hyp_kerf : (gp.n_hyp_kerf + gp.n_hyp_kerg)] += dtr_dthetag + dkl_dthetag
 
         # gradient w.r.t. mu_0
-        elbo_grad[(gp.n_hyp_kerf + gp.n_hyp_kerg)] = 0.5 * np.einsum("ij,jik->k", inner_term1, dR_dmu0)
+        elbo_grad[(gp.n_hyp_kerf + gp.n_hyp_kerg)] = 0.5 * np.einsum("ij,jik->k", inner_term1, dR_dmu0) * mu_0 * np.log(10)
 
         # gradient w.r.t. lambda        
         elbo_grad[(gp.n_hyp_kerf + gp.n_hyp_kerg + 1):] = 0.5 * np.einsum("ij,jik->k", inner_term1, dR_dlambda)
