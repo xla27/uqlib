@@ -25,7 +25,7 @@ class GaussianProcess():
     - predict: statistics of the GP at a set of test points
     """
 
-    def __init__(self, kernel, nproc, reg_tych=0.0):
+    def __init__(self, kernel, nproc=1, reg_tych=0.0):
         self.kernel  = kernel
         self.nproc   = nproc
         self.tych    = reg_tych

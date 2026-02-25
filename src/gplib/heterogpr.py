@@ -27,7 +27,7 @@ class HeteroscedasticGaussianProcess():
     Note: the kernels must be GaussianProcessKernel from scikit-learn.
     """
 
-    def __init__(self, kernel_f, kernel_g, nproc, reg_tych=0.0):
+    def __init__(self, kernel_f, kernel_g, nproc=1, reg_tych=0.0):
         '''
         - kernel_f is the Kernel for the GP of the latent function f ~ GP(f|0, K_g)
         - kernel_g is the Kernel for the GP of the log of the variance 
