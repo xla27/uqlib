@@ -40,13 +40,11 @@ class GaussianProcess():
         self.nproc   = nproc
         self.tych    = reg_tych
 
-    def fit(self, doe, multistart=10):
+    def fit(self, x, y, multistart=10):
         """
         GP fitting via MLE/MAP approach. 
         DIRECT or L-BFGS-B are used for LML/APE optimization, in the latter a multistart approach is employed.
         """
-
-        x, y = doe.data()
 
         # Standardization
         self.y_train_mean = np.mean(y)

@@ -44,14 +44,12 @@ class SparseGaussianProcess():
         self.nproc   = nproc
         self.tych    = reg_tych
 
-    def fit(self, doe, M=50, multistart=10):
+    def fit(self, x, y, M=50, multistart=10):
         """
         SparseGP fitting through greedy algorithm and constructing matrices for prediction.
 
         M -> int for the number of inducing points.
         """
-
-        x, y = doe.data()
 
         # Standardization
         self.y_train_mean = np.mean(y)

@@ -32,9 +32,7 @@ class HeteroscedasticGaussianProcess():
         self.n_hyp_kerg = len(kernel_g.hyperparameters)
 
 
-    def fit(self, doe, multistart=20):
-
-        x, y = doe.data()
+    def fit(self, x, y, multistart=20):
 
         # Standardization
         self.y_train_mean = np.mean(y)
@@ -48,16 +46,19 @@ class HeteroscedasticGaussianProcess():
 
         # computing mu, Sigma of N(g|mu, Sigma)
         mu = self.mu_0 * np.ones(self.ndata) + KG @ ( self.LAMBDA - 0.5 * np.eye(self.ndata) ) @ np.ones(self.ndata)
-        Sigma = np.linalg.inv( np.linalg.inv( KG ) + self.LAMBDA )
+        L_KG  = cholesky(KG, lower=True, overwrite_a=False, check_finite=False)
+        KGINV = cho_solve((L_KG, True), np.eye(self.ndata), overwrite_b=True)
+        L_KGINVLAM = cholesky(KGINV + self.LAMBDA + self.tych * np.eye(self.ndata), lower=True, overwrite_a=True, check_finite=True)
+        Sigma = cho_solve((L_KGINVLAM, True), np.eye(self.ndata), overwrite_b=True)
 
         R = np.diag( np.exp( mu - 0.5 * np.diag( Sigma ) ) )
         # L_KFR is the cholesky decomposition of (K_f + R)
         self.L_KFR = cholesky(KF + R, lower=True, overwrite_a=True, check_finite=False)
         self.alpha = cho_solve((self.L_KFR, True), self.y_norm)
 
-        # L_KGL is the cholesky decomposition of (K_g + LAMBDA^-1)
+        # L_KGLAMINV is the cholesky decomposition of (K_g + LAMBDA^-1)
         temp = np.diag(self.LAMBDA)
-        self.L_KGL = cholesky(KG + np.diag(1/temp), lower=True, overwrite_a=True, check_finite=False)
+        self.L_KGLAMINV = cholesky(KG + np.diag(1/temp), lower=True, overwrite_a=True, check_finite=False)
 
         return
     
@@ -93,7 +94,7 @@ class HeteroscedasticGaussianProcess():
             mustar = KGSTAR.T @ (self.LAMBDA - 0.5 * np.eye(self.ndata)) @ np.ones(self.ndata)
             mustar += self.mu_0 * np.ones(xtest.shape[0])
 
-            W = solve_triangular(self.L_KGL, KGSTAR, lower=True, check_finite=False)
+            W = solve_triangular(self.L_KGLAMINV, KGSTAR, lower=True, check_finite=False)
             sigmastar = self.kernel_g(xtest, xtest)
             sigmastar -= W.T @ W
             sigmastar = np.diag(sigmastar)
@@ -183,7 +184,6 @@ def hetero_model_fitting(gp, x, y, multistart=10):
     opt_func = np.array([])
     for n in range(gp.nproc):
         opt_func = np.append(opt_func, opt_func_tuple[n])
-        print(f'WORK {n} - ELBO {-opt_func_tuple[n]:.6e}')
 
     gp.kernel_f.theta = opt_theta_tuple[np.nanargmin(opt_func)][ : gp.n_hyp_kerf]
     gp.kernel_g.theta = opt_theta_tuple[np.nanargmin(opt_func)][gp.n_hyp_kerf : (gp.n_hyp_kerf + gp.n_hyp_kerg)]
@@ -264,11 +264,14 @@ def neg_elbo(theta, gp, eval_gradient=False):
 
     # computing mu, Sigma of N(g|mu, Sigma)
     mu = mu_0 * np.ones(gp.ndata) + KG @ ( LAMBDA - 0.5 * np.eye(gp.ndata) ) @ np.ones(gp.ndata)
-    Sigma = np.linalg.inv( np.linalg.inv( KG ) + LAMBDA )
+    L_KG  = cholesky(KG, lower=True, overwrite_a=False, check_finite=False)
+    KGINV = cho_solve((L_KG, True), np.eye(gp.ndata), overwrite_b=True)
+    L_KGINVLAM = cholesky(KGINV + LAMBDA + gp.tych * np.eye(gp.ndata), lower=True, overwrite_a=True, check_finite=True)
+    Sigma = cho_solve((L_KGINVLAM, True), np.eye(gp.ndata), overwrite_b=True)
 
     # 1st contribution log N(y|0, KF + R)
     R = np.diag( np.exp( mu - 0.5 * np.diag( Sigma ) ) )
-    L_KFR = cholesky(KF+R, lower=True, overwrite_a=True, check_finite=False)
+    L_KFR = cholesky( KF + R, lower=True, overwrite_a=True, check_finite=True)
     alpha = cho_solve((L_KFR, True), gp.y_norm)
 
     elbo = - gp.ndata/2 * np.log(2*np.pi) - np.sum(np.log(np.diag(L_KFR))) - 0.5 * gp.y_norm.T @ alpha
@@ -292,13 +295,14 @@ def kl_div_normals(mu_1, Sigma_1, mu_2, Sigma_2):
     N(x|mu_1, Sigma_1) and N(x|mu_2, Sigma_2) 
     '''
 
+    chol_Sigma1 = cholesky(Sigma_1, lower=True, overwrite_a=False, check_finite=False)
     chol_Sigma2 = cholesky(Sigma_2, lower=True, overwrite_a=False, check_finite=False)
     
     inv_Sigma2 = cho_solve((chol_Sigma2, True), np.eye(mu_2.size), check_finite=False)
 
     alpha = cho_solve((chol_Sigma2, True), mu_2 - mu_1, check_finite=False)
 
-    kl_div = 2 * np.sum(np.log(np.diag(chol_Sigma2))) - np.log(np.linalg.det(Sigma_1)) - mu_2.size
+    kl_div = 2 * np.sum(np.log(np.diag(chol_Sigma2))) - 2 * np.sum(np.log(np.diag(chol_Sigma1))) - mu_2.size
     kl_div += np.trace(inv_Sigma2 @ Sigma_1)
     kl_div += (mu_2 - mu_1).T @ alpha
     kl_div *= 0.5
