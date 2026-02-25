@@ -1,15 +1,5 @@
-"""
-Module for Gaussian Process regression, from Rasmussen and Williams.
-"""
-import os
-import time
-os.environ["MKL_NUM_THREADS"] = "1" 
-os.environ["NUMEXPR_NUM_THREADS"] = "1" 
-os.environ["OMP_NUM_THREADS"] = "1" 
-os.environ['OPENBLAS_NUM_THREADS'] = "1"
-
 import numpy          as np
-from scipy.optimize import minimize, direct
+from scipy.optimize import minimize
 from scipy.linalg   import cholesky, cho_solve, solve_triangular
 from scipy.stats    import qmc
 
@@ -21,12 +11,11 @@ from itertools import repeat
 # -------------------------------------------------------------------
 
 class SparseGaussianProcess():
-
     """
-    Class for Gaussian Process regression from Rasmussen and Williams.
+    Class for Gaussian Process Sparse regression.
     
     Note:
-    - fitting is performed according to Maximum Likelihood Estimate, with Tychonov regularization
+    - fitting is performed according to a variational-greedy approach, Titsias (2009)
     - inputs (xinput) always belong to the unit hypercube 
     - outputs (mean and variance) will always be statistically standardized
 

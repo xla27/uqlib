@@ -1,15 +1,5 @@
-"""
-Module for Gaussian Process regression, from Rasmussen and Williams.
-"""
-import os
-import time
-os.environ["MKL_NUM_THREADS"] = "1" 
-os.environ["NUMEXPR_NUM_THREADS"] = "1" 
-os.environ["OMP_NUM_THREADS"] = "1" 
-os.environ['OPENBLAS_NUM_THREADS'] = "1"
-
 import numpy          as np
-from scipy.optimize import minimize, direct
+from scipy.optimize import minimize
 from scipy.linalg   import cholesky, cho_solve, solve_triangular
 from scipy.stats    import qmc
 

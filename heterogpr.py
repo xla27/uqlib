@@ -1,13 +1,3 @@
-"""
-Module for Heteroscedastic Gaussian Process regression, from Lazaro-Gredilla and Titsias.
-"""
-import os
-import time
-os.environ["MKL_NUM_THREADS"] = "1" 
-os.environ["NUMEXPR_NUM_THREADS"] = "1" 
-os.environ["OMP_NUM_THREADS"] = "1" 
-os.environ['OPENBLAS_NUM_THREADS'] = "1"
-
 import numpy          as np
 from scipy.optimize import minimize
 from scipy.linalg   import cholesky, cho_solve, solve_triangular
@@ -21,8 +11,28 @@ from itertools import repeat
 # -------------------------------------------------------------------
 
 class HeteroscedasticGaussianProcess():
+    """
+    Class for Heteroscedastic Gaussian Process regression.
+    
+    Note:
+    - fitting is performed according to a variational approach, Lazaro-Gredilla & Titsias (2011)
+    - inputs (xinput) always belong to the unit hypercube 
+    - outputs (mean and variance) will always be statistically standardized
+
+    Methods:
+    - fit
+    - predict
+    - set_noise_scale_bounds i.e., bounds for mu_0
+
+    Note: the kernels must be GaussianProcessKernel from scikit-learn.
+    """
 
     def __init__(self, kernel_f, kernel_g, nproc, reg_tych=0.0):
+        '''
+        - kernel_f is the Kernel for the GP of the latent function f ~ GP(f|0, K_g)
+        - kernel_g is the Kernel for the GP of the log of the variance 
+            eps ~ N(0, r) with r = exp(g) and g ~ GP(g|mu_0, K_g)
+        '''
         self.kernel_f = kernel_f
         self.kernel_g = kernel_g
         self.nproc    = nproc
@@ -130,7 +140,7 @@ class HeteroscedasticGaussianProcess():
  
 def hetero_model_fitting(gp, x, y, multistart=10):
     """
-    Sparse GP model fitting through greedy algorithm
+    Heteroscedastic GP model fitting 
     """
     gp.x       = x
     gp.y       = y
@@ -357,7 +367,7 @@ def neg_elbo(theta, gp, eval_gradient=False):
 
 def kl_div_normals(mu_1, Sigma_1, mu_2, Sigma_2):
     '''
-    Kullback-Leibler divergence of two multivariate Gaussians,
+    Exact Kullback-Leibler divergence of two multivariate Gaussians,
     N(x|mu_1, Sigma_1) and N(x|mu_2, Sigma_2) 
     '''
 
