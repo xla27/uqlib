@@ -226,9 +226,9 @@ def multistart_opt(fitoptfunc, multistart, gp, theta0):
 
         results = minimize(fitoptfunc, 
                            theta_init, 
-                           args=(gp, False), 
+                           args=(gp,True), 
                            method="L-BFGS-B", 
-                           jac=False, 
+                           jac=True, 
                            bounds=list(zip(gp.hyp_lw, gp.hyp_up)),
                            tol=1e-7, 
                            options={'disp': False, 'maxfun':10000})
