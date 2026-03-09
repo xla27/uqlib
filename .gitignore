@@ -1,4 +1,6 @@
 __pycache__/
+pce.egg-info/
+gplib.egg-info/
 *.png
 test*
-gplib.egg-info/
+
