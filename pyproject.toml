@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pce"
+name = "uqlib"
 version = "0.1.0"
-description = "Python package for probabilistic surrogate models"
+description = "Python package for probabilistic surrogate models and uncertainty quantification"
 authors = [
     { name = "Alberto Perlini", email = "alberto.perlini@polimi.it" }
 ]
@@ -17,26 +17,3 @@ dependencies = [
     "scikit-learn",
 ]
 
-[tool.setuptools.packages.find]
-where = ["src"]
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "gplib"
-version = "0.1.0"
-description = "Python package for probabilistic GP-based surrogate models"
-authors = [
-    { name = "Alberto Perlini", email = "alberto.perlini@polimi.it" }
-]
-
-# Optional: project dependencies (same as pip install)
-dependencies = [ 
-    "numpy", 
-    "scipy",
-    "scikit-learn",
-]
-
-[tool.setuptools.packages.find]
-where = ["src"]
