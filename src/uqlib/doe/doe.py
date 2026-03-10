@@ -1,24 +1,17 @@
 import os
-import time
-os.environ["MKL_NUM_THREADS"] = "1" 
-os.environ["NUMEXPR_NUM_THREADS"] = "1" 
-os.environ["OMP_NUM_THREADS"] = "1" 
-os.environ['OPENBLAS_NUM_THREADS'] = "1"
-
-import pickle as pkl
 import itertools
 
 import numpy          as np
 from scipy.stats    import qmc, norm, uniform
 from scipy.special import roots_legendre, roots_hermitenorm, roots_genlaguerre
 from scipy.spatial.distance import cdist
-from sklearn.preprocessing import FunctionTransformer
+
 
 # -------------------------------------------------------------------
 #  DOE class
 # -------------------------------------------------------------------
 
-class DoE():
+class PCEDoE():
     '''
     Class for performing DoE sampling
     '''
@@ -46,7 +39,7 @@ class DoE():
         if 'B' in pdf_var:
             raise NotImplementedError('Beta distribution not yet implemented')
         
-    def __call__(self, **kwargs):
+    def sample(self, **kwargs):
         '''
         Method for generating samples.
         If sampling method MC or LHS use "ndata=".
@@ -140,14 +133,14 @@ class DoE():
 #  Nested DOE class (Le Gratiet algorithm)
 # -------------------------------------------------------------------
 
-class NestedDoE(DoE):
+class NestedPCEDoE(PCEDoE):
     '''
     Class for performing the nested DoE structure
     '''
     methods = ['MC', 'LHS']
     pdf_types = ['U', 'N', 'G', 'B']
 
-    def __call__(self, ndata_per_level):
+    def sample(self, ndata_per_level):
         '''
         Output
         - X is an array containing all the sampling locations
@@ -268,64 +261,5 @@ class NestedDoE(DoE):
         return X_nested, y_nested
     
 
-# -------------------------------------------------------------------
-#  Input Scaler
-# -------------------------------------------------------------------
 
-class DataScaler(FunctionTransformer):
-
-    def __init__(self, pdf_var, bndlw, bndup):
-
-        super().__init__(        
-            func=self.to_standard,
-            inverse_func=self.from_standard,
-            validate=False,
-            accept_sparse=False,
-            check_inverse=True,
-            feature_names_out=None,
-            kw_args={'bndlw':bndlw, 'bndup':bndup},
-            inv_kw_args={'bndlw':bndlw, 'bndup':bndup},)
-        
-        self.pdf_var = pdf_var
-
-    def from_standard(self, X, bndlw, bndup):
-
-        ndata, dim = X.shape
-
-        X_out = np.zeros(X.shape)
-
-        for i_pdf, pdf in enumerate(self.pdf_var):
-
-            if pdf == 'U':
-                lw = np.repeat(bndlw[i_pdf], ndata)
-                up = np.repeat(bndup[i_pdf], ndata)
-                X_out[:, i_pdf] = (up + lw)/2 + X[:,i_pdf] * (up - lw)/2
-
-            elif pdf == 'N':
-                mean = np.repeat(bndlw[i_pdf], ndata)
-                std  = np.repeat(bndup[i_pdf], ndata)
-                X_out[:, i_pdf] = mean + std * X[:, i_pdf]
-
-        return X_out
-
-
-    def to_standard(self, X, bndlw, bndup):
-
-        ndata, dim = X.shape
-
-        X_out = np.zeros(X.shape)
-
-        for i_pdf, pdf in enumerate(self.pdf_var):
-
-            if pdf == 'U':
-                lw = np.repeat(bndlw[i_pdf], ndata)
-                up = np.repeat(bndup[i_pdf], ndata)
-                X_out[:, i_pdf] = (2/(up - lw)) * (X[:, i_pdf] - (up + lw)/2) 
-
-            elif pdf == 'N':
-                mean = np.repeat(bndlw[i_pdf], ndata)
-                std  = np.repeat(bndup[i_pdf], ndata)
-                X_out[:, i_pdf] = (X[:, i_pdf] - mean) / std
-
-        return X_out
 

@@ -3,7 +3,7 @@ import os, sys, shutil
 import numpy as np
 import math
 from scipy.special import legendre, hermitenorm, genlaguerre, jacobi, gamma
-from scipy.linalg import lstsq, inv, cholesky, cho_solve, cho_factor
+from scipy.linalg import cho_solve, cho_factor
 
 from itertools import product, combinations
 

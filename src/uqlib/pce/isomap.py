@@ -6,7 +6,6 @@ from scipy.stats import qmc, norm, uniform
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import shortest_path
 from sklearn.neighbors import NearestNeighbors
-import copy
 
 from . import PCE
 

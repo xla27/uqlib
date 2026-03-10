@@ -1,6 +1,6 @@
 import numpy as np
 
-from itertools import product, combinations
+from itertools import combinations
 
 from .pce import PCE, legendre_norm, hermite_norm
 
