@@ -1,6 +1,7 @@
 __pycache__/
-pce.egg-info/
-gplib.egg-info/
+uqlib.egg-info/
 *.png
+*.svg
+*.pdf
 test*
 
