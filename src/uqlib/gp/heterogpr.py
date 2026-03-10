@@ -1,10 +1,13 @@
 import numpy          as np
-from scipy.optimize import minimize
-from scipy.linalg   import cholesky, cho_solve, solve_triangular
-from scipy.stats    import qmc
+from scipy.linalg   import cholesky, solve_triangular
 
-import multiprocessing
-from itertools import repeat
+from .utils import (
+    standardize_targets, initialize_gp_metadata,
+    build_hyperparameter_bounds, generate_lhs_points, 
+    destandardize_predictions, run_multiprocessing_optimization,
+    solve_cholesky_system, compute_cholesky_inverse,
+    kl_div_normals
+)
 
 # -------------------------------------------------------------------
 #  Heteroscedastic Gaussian Process Class
@@ -45,10 +48,36 @@ class HeteroscedasticGaussianProcess():
     def fit(self, x, y, multistart=20):
 
         # Standardization
-        self.y_train_mean = np.mean(y)
-        self.y_train_std  = np.std(y)
+        self.y_train_mean, self.y_train_std = standardize_targets(y)
 
-        hetero_model_fitting(self, x, y, multistart=multistart)
+        if not hasattr(self, 'noise_scale_bounds'):
+            self.set_noise_scale_bounds()
+
+        # Preprocessing
+        initialize_gp_metadata(self, x, y)
+
+        self.hyp_lw, self.hyp_up = build_hyperparameter_bounds(
+            [self.kernel_f.bounds, self.kernel_g.bounds],
+            {
+                'mu_0': (self.noise_scale_bounds[0], self.noise_scale_bounds[1]),
+                'lambda': (0 * np.ones(self.ndata), 10 * np.ones(self.ndata))  # for LAMBDA parameters
+            }
+        )
+
+        # fitting method
+        fitoptfunc = neg_elbo
+
+        # Global optimization of the model loss function (hyperparameters are log-transformed for the optimization and then transformed back)
+        bounds = list(zip(self.hyp_lw, self.hyp_up))
+        init_poin_list, multistart_vec = generate_lhs_points(bounds, multistart, self.nproc)
+        
+        # Multiprocessing for multipoint optimization
+        opt_func, opt_theta = run_multiprocessing_optimization(fitoptfunc, self, init_poin_list, multistart_vec)
+
+        self.kernel_f.theta = opt_theta[np.nanargmin(opt_func),: self.n_hyp_kerf]
+        self.kernel_g.theta = opt_theta[np.nanargmin(opt_func),self.n_hyp_kerf : (self.n_hyp_kerf + self.n_hyp_kerg)]
+        self.mu_0           = 10**(opt_theta[np.nanargmin(opt_func),(self.n_hyp_kerf + self.n_hyp_kerg)])
+        self.LAMBDA         = np.diag( opt_theta[np.nanargmin(opt_func),(self.n_hyp_kerf + self.n_hyp_kerg+1) : ])
 
         # All the matrices used for GP predicition are built
         KF = self.kernel_f(self.x) + self.tych * np.eye(self.ndata) 
@@ -57,22 +86,19 @@ class HeteroscedasticGaussianProcess():
         # computing mu, Sigma of N(g|mu, Sigma)
         mu = self.mu_0 * np.ones(self.ndata) + KG @ ( self.LAMBDA - 0.5 * np.eye(self.ndata) ) @ np.ones(self.ndata)
         L_KG  = cholesky(KG, lower=True, overwrite_a=False, check_finite=False)
-        KGINV = cho_solve((L_KG, True), np.eye(self.ndata), overwrite_b=True)
-        L_KGINVLAM = cholesky(KGINV + self.LAMBDA + self.tych * np.eye(self.ndata), lower=True, overwrite_a=True, check_finite=True)
-        Sigma = cho_solve((L_KGINVLAM, True), np.eye(self.ndata), overwrite_b=True)
+        KGINV = compute_cholesky_inverse(L_KG)
+
+        _, Sigma = solve_cholesky_system(KGINV + self.LAMBDA, np.eye(self.ndata), self.tych)
 
         R = np.diag( np.exp( mu - 0.5 * np.diag( Sigma ) ) )
         # L_KFR is the cholesky decomposition of (K_f + R)
-        self.L_KFR = cholesky(KF + R, lower=True, overwrite_a=True, check_finite=False)
-        self.alpha = cho_solve((self.L_KFR, True), self.y_norm)
+        self.L_KFR, self.alpha = solve_cholesky_system(KF + R, self.y_norm)
 
         # L_KGLAMINV is the cholesky decomposition of (K_g + LAMBDA^-1)
         temp = np.diag(self.LAMBDA)
         self.L_KGLAMINV = cholesky(KG + np.diag(1/temp), lower=True, overwrite_a=True, check_finite=False)
-
-        return
     
-    def predict(self, xtest, return_var=True, normalized=True, standardized=False):
+    def predict(self, xtest, return_var=True, standardized=False):
         """
         Method to compute the prediction of the GP at single or multiple test points.
 
@@ -111,136 +137,17 @@ class HeteroscedasticGaussianProcess():
 
             y_var = cstar2 + np.exp(mustar + 0.5 * sigmastar)
 
-            if standardized:
-                return y_mean, y_var
-            
-            if not standardized:
-                y_mean = y_mean * self.y_train_std + self.y_train_mean
-                y_var  = y_var * self.y_train_std**2
-                return y_mean, y_var
+            return destandardize_predictions(y_mean, self.y_train_mean, 
+                                 self.y_train_std, y_var, standardized)
             
         else:
 
-            if standardized:
-                return y_mean
-            
-            if not standardized:
-                y_mean = y_mean * self.y_train_std + self.y_train_mean
-                return y_mean           
+            return destandardize_predictions(y_mean, self.y_train_mean, 
+                                 self.y_train_std, None, standardized)          
 
-        return
-    
     def set_noise_scale_bounds(self, lb=1e-6, ub=1e-2):
         self.noise_scale_bounds = np.array([np.log10(lb), np.log10(ub)])
     
-
-# -------------------------------------------------------------------
-#  Model Fitting
-# -------------------------------------------------------------------
- 
-def hetero_model_fitting(gp, x, y, multistart=10):
-    """
-    Heteroscedastic GP model fitting 
-    """
-    gp.x       = x
-    gp.y       = y
-    gp.dim     = x.shape[1]
-    gp.ndata   = x.shape[0]
-
-    # Normalization
-    gp.y_norm = (gp.y.reshape(gp.ndata,1) - gp.y_train_mean * np.ones((gp.ndata,1))) / gp.y_train_std
-
-    # fitting method
-    fitoptfunc = neg_elbo
-
-    # Kernel hyperparameters bounds
-    if not hasattr(gp, 'noise_scale_bounds'):
-        gp.set_noise_scale_bounds()
-
-    # hyperparameters bounds [kernel_f, kernel_g, mu_0, LAMBDA]
-    hyp_lw = gp.kernel_f.bounds[:,0];                     hyp_up = gp.kernel_f.bounds[:,1] 
-    hyp_lw = np.append(hyp_lw, gp.kernel_g.bounds[:,0]);  hyp_up = np.append(hyp_up, gp.kernel_g.bounds[:,1])
-    hyp_lw = np.append(hyp_lw, gp.noise_scale_bounds[0]); hyp_up = np.append(hyp_up, gp.noise_scale_bounds[1])
-    hyp_lw = np.append(hyp_lw, np.zeros(gp.ndata));       hyp_up = np.append(hyp_up, 10 * np.ones(gp.ndata)); 
-
-    gp.hyp_lw = hyp_lw
-    gp.hyp_up = hyp_up
-
-    bounds = list(zip(hyp_lw, hyp_up))
-    multistart_vec = [int(multistart / gp.nproc) for i in range(gp.nproc)]
-
-    # sampling the whole set of initial points via LHS and then partion it for the number of processors
-    sampler = qmc.LatinHypercube(d=len(bounds))
-    initial_points = sampler.random(n=multistart)
-    initial_points = qmc.scale(initial_points, hyp_lw, hyp_up)
-    init_poin_list = [ initial_points[i*(int(multistart / gp.nproc)) : (i+1)*(int(multistart / gp.nproc))] for i in range(gp.nproc)]
-    
-    # redistributing the remaing part of initial points
-    assigned = (gp.nproc)*int(multistart / gp.nproc)
-    if assigned < multistart:
-        for i in range(multistart - assigned):
-            init_poin_list[i] = np.vstack((init_poin_list[i], initial_points[assigned + i,:]))
-            
-    # multiprocessing for multipoint optimization
-    pool = multiprocessing.Pool(processes=gp.nproc) 
-    opt_func_tuple, opt_theta_tuple = zip(*pool.starmap(multistart_opt, 
-                                                        zip(repeat(fitoptfunc),
-                                                        multistart_vec, 
-                                                        repeat(gp), 
-                                                        init_poin_list)))        
-    pool.close()
-    pool.join()
-
-    opt_func = np.array([])
-    for n in range(gp.nproc):
-        opt_func = np.append(opt_func, opt_func_tuple[n])
-
-    gp.kernel_f.theta = opt_theta_tuple[np.nanargmin(opt_func)][ : gp.n_hyp_kerf]
-    gp.kernel_g.theta = opt_theta_tuple[np.nanargmin(opt_func)][gp.n_hyp_kerf : (gp.n_hyp_kerf + gp.n_hyp_kerg)]
-    gp.mu_0           = 10**(opt_theta_tuple[np.nanargmin(opt_func)][(gp.n_hyp_kerf + gp.n_hyp_kerg)])
-    gp.LAMBDA         = np.diag( opt_theta_tuple[np.nanargmin(opt_func)][(gp.n_hyp_kerf + gp.n_hyp_kerg+1) : ])
-
-
-def multistart_opt(fitoptfunc, multistart, gp, theta0):
-    """
-    Function to allow multiprocessing for LML maximization.
-    Basically, it parallelizes the for-cycle of L-BFGS-B multistart
-
-    Input:
-    - multistart is an integer that represent the number of for-cycle per each process
-    - gp is the GaussianProcess class
-    - init_set is the set of initial points LHS-sampled
-
-    Output:
-    - opt_lml is the vector of the optimized (neg)LML of each multistart
-    - opt_theta is the array of the optimized hyperparameters of each multistart
-
-    """
-
-    opt_func = np.zeros(multistart)
-    opt_theta = np.zeros_like(theta0)
-
-    for j in range(multistart):
-
-        theta_init = theta0[j,:]
-
-        results = minimize(fitoptfunc, 
-                           theta_init, 
-                           args=(gp,True), 
-                           method="L-BFGS-B", 
-                           jac=True, 
-                           bounds=list(zip(gp.hyp_lw, gp.hyp_up)),
-                           tol=1e-7, 
-                           options={'disp': False, 'maxfun':10000})
-        
-        if results.success == False:
-            opt_func[j] = np.nan
-            opt_theta[j,:] = opt_theta[j-1,:]
-        else:
-            opt_func[j] = results.fun
-            opt_theta[j,:] = np.squeeze(results.x)
-
-    return np.nanmin(opt_func), opt_theta[np.nanargmin(opt_func),:]
 
 # -------------------------------------------------------------------
 #  Negative Variational Log Marginal Likelihood Lower Bound
@@ -281,14 +188,13 @@ def neg_elbo(theta, gp, eval_gradient=False):
     # computing mu, Sigma of N(g|mu, Sigma)
     mu = mu_0 * np.ones(gp.ndata) + KG @ ( LAMBDA - 0.5 * np.eye(gp.ndata) ) @ np.ones(gp.ndata)
     L_KG  = cholesky(KG, lower=True, overwrite_a=False, check_finite=False)
-    KGINV = cho_solve((L_KG, True), np.eye(gp.ndata), overwrite_b=True)
-    L_KGINVLAM = cholesky(KGINV + LAMBDA + gp.tych * np.eye(gp.ndata), lower=True, overwrite_a=True, check_finite=True)
-    Sigma = cho_solve((L_KGINVLAM, True), np.eye(gp.ndata), overwrite_b=True)
+    KGINV = compute_cholesky_inverse(L_KG)
+
+    _, Sigma = solve_cholesky_system(KGINV + LAMBDA, np.eye(gp.ndata), gp.tych)
 
     # 1st contribution log N(y|0, KF + R)
     R = np.diag( np.exp( mu - 0.5 * np.diag( Sigma ) ) )
-    L_KFR = cholesky( KF + R, lower=True, overwrite_a=True, check_finite=True)
-    alpha = cho_solve((L_KFR, True), gp.y_norm)
+    L_KFR, alpha = solve_cholesky_system(KF + R, gp.y_norm)
 
     elbo = - gp.ndata/2 * np.log(2*np.pi) - np.sum(np.log(np.diag(L_KFR))) - 0.5 * gp.y_norm.T @ alpha
 
@@ -306,7 +212,7 @@ def neg_elbo(theta, gp, eval_gradient=False):
         elbo_grad = np.zeros_like(theta)
 
         # gradient w.r.t. hyperpar of theta_f
-        KFR_inv = cho_solve((L_KFR, True), np.eye(gp.ndata), check_finite=False)
+        KFR_inv = compute_cholesky_inverse(L_KFR)
         inner_term1 = (alpha @ alpha.T - KFR_inv)
         elbo_grad[ : gp.n_hyp_kerf] = 1/2 * np.einsum("ij,jik->k", inner_term1, dKF)
 
@@ -364,23 +270,3 @@ def neg_elbo(theta, gp, eval_gradient=False):
 
         return - elbo, - elbo_grad
     
-
-def kl_div_normals(mu_1, Sigma_1, mu_2, Sigma_2):
-    '''
-    Exact Kullback-Leibler divergence of two multivariate Gaussians,
-    N(x|mu_1, Sigma_1) and N(x|mu_2, Sigma_2) 
-    '''
-
-    chol_Sigma1 = cholesky(Sigma_1, lower=True, overwrite_a=False, check_finite=False)
-    chol_Sigma2 = cholesky(Sigma_2, lower=True, overwrite_a=False, check_finite=False)
-    
-    inv_Sigma2 = cho_solve((chol_Sigma2, True), np.eye(mu_2.size), check_finite=False)
-
-    alpha = cho_solve((chol_Sigma2, True), mu_2 - mu_1, check_finite=False)
-
-    kl_div = 2 * np.sum(np.log(np.diag(chol_Sigma2))) - 2 * np.sum(np.log(np.diag(chol_Sigma1))) - mu_2.size
-    kl_div += np.trace(inv_Sigma2 @ Sigma_1)
-    kl_div += (mu_2 - mu_1).T @ alpha
-    kl_div *= 0.5
-
-    return kl_div

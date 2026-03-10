@@ -1,10 +1,12 @@
 import numpy          as np
-from scipy.optimize import minimize
-from scipy.linalg   import cholesky, cho_solve, solve_triangular
-from scipy.stats    import qmc
+from scipy.linalg   import solve_triangular
 
-import multiprocessing
-from itertools import repeat
+from .utils import (
+    standardize_targets, initialize_gp_metadata,
+    build_hyperparameter_bounds, generate_lhs_points, 
+    destandardize_predictions, run_multiprocessing_optimization,
+    solve_cholesky_system, compute_cholesky_inverse
+)
 
 # -------------------------------------------------------------------
 #  Gaussian Process Class
@@ -37,33 +39,31 @@ class GaussianProcess():
         """
 
         # Standardization
-        self.y_train_mean = np.mean(y)
-        self.y_train_std  = np.std(y)
+        self.y_train_mean, self.y_train_std = standardize_targets(y)
 
-        model_fitting(self, x, y, multistart=multistart)
+        # Preprocessing
+        initialize_gp_metadata(self, x, y)
+
+        self.hyp_lw, self.hyp_up = build_hyperparameter_bounds([self.kernel.bounds])
+
+        # fitting method
+        fitoptfunc = logmarglike   
+            
+        # Global optimization of the model loss function (hyperparameters are log-transformed for the optimization and then transformed back)
+        bounds = list(zip(self.hyp_lw, self.hyp_up))
+        init_poin_list, multistart_vec = generate_lhs_points(bounds, multistart, self.nproc)
+                
+        # Multiprocessing for multipoint optimization
+        opt_func, opt_theta = run_multiprocessing_optimization(fitoptfunc, self, init_poin_list, multistart_vec)
+
+        self.kernel.theta = opt_theta[np.nanargmin(opt_func),:]
 
         # All the matrices used for GP predicition are built
-
-        # Standardization
-        self.y_norm = (self.y.reshape(self.ndata,1) - self.y_train_mean * np.ones((self.ndata,1))) / self.y_train_std 
-
-        # Kernel computation
         K = self.kernel(self.x, eval_gradient=False)
 
-        '''
-        # Cholesky decomposition of the noisy covariance matrix - Standard computation
-        L    = np.linalg.cholesky(K + self.tych**2 * np.eye(self.ndata))
-        Linv = np.linalg.inv(L)
-        alpha = np.linalg.inv(L.T) @ (Linv @ y_norm)
-        '''
-
-        # Cholesky decomposition of the noisy covariance matrix - Faster computation without matrix inversion
-        self.L     = np.linalg.cholesky(K + self.tych * np.eye(self.ndata))
-        self.alpha = cho_solve((self.L, True), 
-                               self.y_norm, 
-                               check_finite=False)
+        self.L, self.alpha = solve_cholesky_system(K, self.y_norm, self.tych)
         
-    def predict(self, xtest, return_cov=True, normalized=True, standardized=False):
+    def predict(self, xtest, return_cov=True, standardized=False):
         """
         Method to compute the prediction of the GP at single or multiple test points.
 
@@ -86,124 +86,13 @@ class GaussianProcess():
             
             y_cov = self.kernel(xtest, xtest) - V.T @ V
 
-            if standardized:
-                return y_mean, y_cov
-            
-            if not standardized:
-                y_mean = y_mean * self.y_train_std + self.y_train_mean
-                y_cov  = y_cov * self.y_train_std**2
-                return y_mean, y_cov
+            return destandardize_predictions(y_mean, self.y_train_mean, 
+                                 self.y_train_std, y_cov, standardized)
         
         else:
 
-            if standardized:
-                return y_mean
-            
-            if not standardized:
-                y_mean = y_mean * self.y_train_std + self.y_train_mean
-                return y_mean
-
-
-# -------------------------------------------------------------------
-#  Model Fitting
-# -------------------------------------------------------------------
- 
-def model_fitting(gp, x, y, multistart=100):
-    """
-    GP fitting via MLE/MAP approach. 
-    DIRECT or L-BFGS-B are used for LML/APE optimization, in the latter a multistart approach is employed.
-    """
-    gp.x       = x
-    gp.y       = y
-    gp.dim     = x.shape[1]
-    gp.ndata   = x.shape[0]
-
-    # fitting method
-    fitoptfunc = logmarglike
-
-    # Hyperparameters bounds
-    hyp_lw = gp.kernel.bounds[:,0]
-    hyp_up = gp.kernel.bounds[:,1] 
-
-    gp.hyp_lw = hyp_lw
-    gp.hyp_up = hyp_up
-
-    # Normalization
-    y_norm = (gp.y.reshape(gp.ndata,1) - gp.y_train_mean * np.ones((gp.ndata,1))) / gp.y_train_std
-
-    gp.y_norm = y_norm
-        
-    # Global optimization of the model loss function (hyperparameters are log-transformed for the optimization and then transformed back)
-    bounds = list(zip(hyp_lw, hyp_up))
-
-    multistart_vec = [int(multistart / gp.nproc) for i in range(gp.nproc)]
-
-    # sampling the whole set of initial points via LHS and then partion it for the number of processors
-    sampler = qmc.LatinHypercube(d=len(bounds))
-    initial_points = sampler.random(n=multistart)
-    initial_points = np.repeat(hyp_lw[np.newaxis, :], repeats=multistart, axis=0) + initial_points*(
-        np.repeat(hyp_up[np.newaxis, :], repeats=multistart, axis=0) - np.repeat(hyp_lw[np.newaxis, :], repeats=multistart, axis=0)
-    )
-    init_poin_list = [ initial_points[i*(int(multistart / gp.nproc)) : (i+1)*(int(multistart / gp.nproc))] for i in range(gp.nproc)]
-    
-    # redistributing the remaing part of initial points
-    assigned = (gp.nproc)*int(multistart / gp.nproc)
-    if assigned < multistart:
-        for i in range(multistart - assigned):
-            init_poin_list[i] = np.vstack((init_poin_list[i], initial_points[assigned + i,:]))
-            
-    # multiprocessing for multipoint optimization
-    pool = multiprocessing.Pool(processes=gp.nproc) 
-    opt_lml_tuple, opt_theta_tuple = zip(*pool.starmap(multistart_opt, zip(repeat(fitoptfunc), multistart_vec, repeat(gp), init_poin_list)))        
-    pool.close()
-    pool.join()
-
-    opt_lml = np.array([])
-    opt_theta = np.empty((0,len(bounds)))
-    for n in range(gp.nproc):
-        opt_lml = np.append(opt_lml, opt_lml_tuple[n])
-        opt_theta = np.vstack((opt_theta, opt_theta_tuple[n]))
-
-    gp.kernel.theta = opt_theta[np.argmin(opt_lml),:]
-
-
-def multistart_opt(fitoptfunc, multistart, gp, init_set):
-    """
-    Function to allow multiprocessing for LML maximization.
-    Basically, it parallelizes the for-cycle of L-BFGS-B multistart
-
-    Input:
-    - multistart is an integer that represent the number of for-cycle per each process
-    - gp is the GaussianProcess class
-    - init_set is the set of initial points LHS-sampled
-
-    Output:
-    - opt_lml is the vector of the optimized (neg)LML of each multistart
-    - opt_theta is the array of the optimized hyperparameters of each multistart
-
-    """
-
-    opt_lml = np.zeros(multistart)
-    opt_theta = np.zeros((multistart, len(gp.hyp_lw)))
-    for i in range(multistart):
-        log_initial = init_set[i, :]
-
-        results = minimize(fitoptfunc, 
-                           log_initial, 
-                           args=(gp, True), 
-                           method="L-BFGS-B", 
-                           jac=True, 
-                           bounds=list(zip(gp.hyp_lw, gp.hyp_up)),
-                           tol=1e-7, 
-                           options={'disp': False, 'maxfun':10000})
-        
-        if results.success == False:
-            opt_lml[i] = 1e10
-        else:
-            opt_lml[i] = results.fun
-        opt_theta[i,:] = (results.x).reshape(1, len(gp.hyp_lw))
-
-    return opt_lml, opt_theta
+            return destandardize_predictions(y_mean, self.y_train_mean, 
+                                 self.y_train_std, None, standardized)
 
 
 # -------------------------------------------------------------------
@@ -228,11 +117,7 @@ def logmarglike(theta, gp, eval_gradient=False):
     K, K_gradient = gp.kernel(gp.x, eval_gradient=True)
 
     # Cholesky decomposition of the noisy covariance matrix
-    K     = K + gp.tych * np.eye(gp.ndata)                 # Tychonov regularization
-    L     = cholesky(K, lower=True, overwrite_a=True, check_finite=False)
-    # from Rasmussen & Williams:
-    # alpha = L^T \ (L \ y)
-    alpha = cho_solve((L, True), gp.y_norm, check_finite=False)
+    L, alpha = solve_cholesky_system(K, gp.y_norm, gp.tych)
 
     # Computation of the marginal likelihood
     log_marg_like = - 0.5 * gp.y_norm.T @ alpha - np.sum(np.log(np.diag(L))) - gp.ndata / 2 * np.log(2*np.pi)
@@ -245,7 +130,7 @@ def logmarglike(theta, gp, eval_gradient=False):
         # Computation of the marginal likelihood gradient
         # from Rasmussen & Williams, each gradient component theta_j is equal to
         #  0.5 * trace((alpha . alpha^T - K^-1) . dK_dtheta_j)            
-        K_inv = cho_solve((L, True), np.eye(gp.ndata), check_finite=False)
+        K_inv = compute_cholesky_inverse(L)
         inner_term = (alpha @ alpha.T - K_inv)
         inner_term = inner_term[..., np.newaxis]
 

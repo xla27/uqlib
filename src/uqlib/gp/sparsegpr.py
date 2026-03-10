@@ -1,10 +1,12 @@
 import numpy          as np
-from scipy.optimize import minimize
-from scipy.linalg   import cholesky, cho_solve, solve_triangular
-from scipy.stats    import qmc
+from scipy.linalg   import cholesky, solve_triangular
 
-import multiprocessing
-from itertools import repeat
+from .utils import (
+    standardize_targets, initialize_gp_metadata,
+    build_hyperparameter_bounds, generate_lhs_points, 
+    destandardize_predictions, run_multiprocessing_optimization,
+    solve_cholesky_system, compute_cholesky_inverse
+)
 
 # -------------------------------------------------------------------
 #  Sparse Gaussian Process Class
@@ -41,10 +43,36 @@ class SparseGaussianProcess():
         """
 
         # Standardization
-        self.y_train_mean = np.mean(y)
-        self.y_train_std  = np.std(y)
+        self.y_train_mean, self.y_train_std = standardize_targets(y)
 
-        sparse_model_fitting(self, x, y, M, multistart=self.nproc if self.nproc <= 10 else 10)
+        if not hasattr(self, 'noise_bounds'):
+            self.set_noise_bounds()
+
+        initialize_gp_metadata(self, x, y)
+
+        self.hyp_lw, self.hyp_up = build_hyperparameter_bounds(
+            [self.kernel.bounds],
+            {'noise': (self.noise_bounds[0], self.noise_bounds[1])}
+        )
+
+        # fitting method
+        fitoptfunc = neg_elbo
+
+        # Global optimization of the model loss function (hyperparameters are log-transformed for the optimization and then transformed back)
+        bounds = list(zip(self.hyp_lw, self.hyp_up))
+        init_poin_list, _ = generate_lhs_points(bounds, self.nproc, self.nproc)
+        multistart_vec = [M] * self.nproc
+
+        # multiprocessing for multipoint optimization
+        opt_func, opt_theta, opt_xm = run_multiprocessing_optimization(fitoptfunc, 
+                                                                       self, 
+                                                                       init_poin_list, 
+                                                                       multistart_vec, 
+                                                                       extra_args=(True,))
+
+        self.kernel.theta = opt_theta[np.nanargmin(opt_func),:-1]
+        self.noise_level  = opt_theta[np.nanargmin(opt_func),-1]
+        self.xm           = opt_xm[np.nanargmin(opt_func)]
 
         # All the matrices used for GP predicition are built
 
@@ -53,20 +81,19 @@ class SparseGaussianProcess():
         KMN = self.kernel(self.xm, self.x)
 
         # Cholesky decomposition of the noisy covariance matrix - Faster computation without matrix inversion
-        self.LMM = np.linalg.cholesky(KMM + self.tych * np.eye(self.xm.shape[0]))
         SIGMA = np.linalg.inv(KMM + 1 / self.noise_level * KMN @ KMN.T + self.tych * np.eye(self.xm.shape[0]))
 
         self.mu_m = 1 / self.noise_level * KMM @ SIGMA @ KMN @ self.y_norm
         self.A_m  = KMM @ SIGMA @ KMM
 
-        self.alpha = cho_solve((self.LMM, True), self.mu_m, check_finite=False)
+        self.LMM, self.alpha = solve_cholesky_system(KMM, self.mu_m, self.tych)
 
         # W = cho_solve((self.LMM, True), self.A_m, check_finite=False)
         # self.Z = np.transpose(cho_solve((self.LMM, True), W.T, check_finite=False))
-        KMMinv = cho_solve((self.LMM,True), np.eye(self.xm.shape[0]), check_finite=False)
+        KMMinv = compute_cholesky_inverse(self.LMM)
         self.Z = KMMinv @ self.A_m @ KMMinv
 
-    def predict(self, xtest, return_cov=True, normalized=True, standardized=False):
+    def predict(self, xtest, return_cov=True, standardized=False):
         """
         Method to compute the prediction of the GP at single or multiple test points.
 
@@ -91,146 +118,17 @@ class SparseGaussianProcess():
             
             y_cov = self.kernel(xtest, xtest) - V.T @ V + KSTARM @ self.Z @ KMSTAR
 
-            if standardized:
-                return y_mean, y_cov
-            
-            if not standardized:
-                y_mean = y_mean * self.y_train_std + self.y_train_mean
-                y_cov  = y_cov * self.y_train_std**2
-                return y_mean, y_cov
+            return destandardize_predictions(y_mean, self.y_train_mean, 
+                                 self.y_train_std, y_cov, standardized)
         
         else:
 
-            if standardized:
-                return y_mean
+            return destandardize_predictions(y_mean, self.y_train_mean, 
+                                 self.y_train_std, None, standardized)
             
-            if not standardized:
-                y_mean = y_mean * self.y_train_std + self.y_train_mean
-                return y_mean
-            
-    def set_noise(self, bndlw=1e-6, bndup=1e-2):
-        self.noise_bounds = np.array([bndlw, bndup])
+    def set_noise_bounds(self, lb=1e-6, ub=1e-2):
+        self.noise_bounds = np.array([lb, ub])
 
-
-# -------------------------------------------------------------------
-#  Model Fitting
-# -------------------------------------------------------------------
- 
-def sparse_model_fitting(gp, x, y, M, multistart=10):
-    """
-    Sparse GP model fitting through greedy algorithm
-    """
-    gp.x       = x
-    gp.y       = y
-    gp.dim     = x.shape[1]
-    gp.ndata   = x.shape[0]
-
-    # Normalization
-    gp.y_norm = (gp.y.reshape(gp.ndata,1) - gp.y_train_mean * np.ones((gp.ndata,1))) / gp.y_train_std
-
-    # fitting method
-    fitoptfunc = neg_elbo
-
-    # Kernel hyperparameters bounds
-    if not hasattr(gp, 'noise_bounds'):
-        gp.set_noise()
-
-    hyp_lw = np.append(gp.kernel.bounds[:,0], gp.noise_bounds[0])
-    hyp_up = np.append(gp.kernel.bounds[:,1], gp.noise_bounds[1])
-
-    gp.hyp_lw = hyp_lw
-    gp.hyp_up = hyp_up
-
-    bounds = list(zip(hyp_lw, hyp_up))
-    multistart_vec = [int(multistart / gp.nproc) for i in range(gp.nproc)]
-
-    # sampling the whole set of initial points via LHS and then partion it for the number of processors
-    sampler = qmc.LatinHypercube(d=len(bounds))
-    initial_points = sampler.random(n=multistart)
-    initial_points = qmc.scale(initial_points, hyp_lw, hyp_up)
-    init_poin_list = [ initial_points[i*(int(multistart / gp.nproc)) : (i+1)*(int(multistart / gp.nproc))] for i in range(gp.nproc)]
-    
-    # redistributing the remaing part of initial points
-    assigned = (gp.nproc)*int(multistart / gp.nproc)
-    if assigned < multistart:
-        for i in range(multistart - assigned):
-            init_poin_list[i] = np.vstack((init_poin_list[i], initial_points[assigned + i,:]))
-            
-    # multiprocessing for multipoint optimization
-    pool = multiprocessing.Pool(processes=gp.nproc) 
-    opt_func_tuple, opt_theta_tuple, xm_tuple = zip(*pool.starmap(multistart_opt, 
-                                                       zip(repeat(fitoptfunc),
-                                                       multistart_vec, 
-                                                       repeat(gp), 
-                                                       repeat(M),
-                                                       init_poin_list)))        
-    pool.close()
-    pool.join()
-
-    opt_func = np.array([])
-    for n in range(gp.nproc):
-        opt_func = np.append(opt_func, opt_func_tuple[n])
-        print(f'WORK {n} - ELBO {-opt_func_tuple[n]:.6e}')
-
-
-    gp.kernel.theta = opt_theta_tuple[np.nanargmin(opt_func)][:-1]
-    gp.noise_level  = opt_theta_tuple[np.nanargmin(opt_func)][-1]
-    gp.xm           = xm_tuple[np.nanargmin(opt_func)]
-
-def multistart_opt(fitoptfunc, multistart, gp, M, theta0):
-    """
-    Function to allow multiprocessing for LML maximization.
-    Basically, it parallelizes the for-cycle of L-BFGS-B multistart
-
-    Input:
-    - multistart is an integer that represent the number of for-cycle per each process
-    - gp is the GaussianProcess class
-    - init_set is the set of initial points LHS-sampled
-
-    Output:
-    - opt_lml is the vector of the optimized (neg)LML of each multistart
-    - opt_theta is the array of the optimized hyperparameters of each multistart
-
-    """
-    # GREEDY ALGORITHM
-    opt_func = np.zeros(M)
-    opt_theta = np.zeros((M, theta0.size))
-    M_INDEX = []
-    i_opt = 0
-    theta0 = np.squeeze(theta0)
-    for j in range(M):
-
-        while True:
-            t = np.random.randint(0, gp.ndata-1)
-            if t not in M_INDEX:
-                M_INDEX.append(t)
-                break
-
-        xm = gp.x[M_INDEX,:]
-
-        results = minimize(fitoptfunc, 
-                           theta0, 
-                           args=(gp, xm, False), 
-                           method="L-BFGS-B", 
-                           jac=False, 
-                           bounds=list(zip(gp.hyp_lw, gp.hyp_up)),
-                           tol=1e-7, 
-                           options={'disp': False, 'maxfun':10000})
-        
-        if results.success == False:
-            opt_func[i_opt] = np.nan
-            opt_theta[i_opt,:] = opt_theta[i_opt-1,:]
-        else:
-            opt_func[i_opt] = results.fun
-            opt_theta[i_opt,:] = np.squeeze(results.x)
-
-        # starting from the new optimum
-        theta0 = opt_theta[i_opt,:]
-
-        i_opt+=1
-
-
-    return opt_func[-1], opt_theta[-1,:], xm
 
 # -------------------------------------------------------------------
 #  Negative Variational Log Marginal Likelihood Lower Bound
@@ -253,7 +151,7 @@ def neg_elbo(theta, gp, xm, eval_gradient=False):
     formula of Krasser: https://krasserm.github.io/2020/12/12/gaussian-processes-sparse/
     """
     gp.kernel.theta = theta[:-1]
-    noise_level          = theta[-1]
+    noise_level     = theta[-1]
 
     # Kernel computation
     KNN = gp.kernel(gp.x)
