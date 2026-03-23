@@ -1,5 +1,5 @@
 import numpy          as np
-from scipy.linalg   import cholesky, solve_triangular
+from scipy.linalg   import cholesky, solve_triangular, cho_solve
 
 from .utils import (
     standardize_targets, initialize_gp_metadata,
@@ -35,7 +35,7 @@ class SparseGaussianProcess():
         self.nproc   = nproc
         self.tych    = reg_tych
 
-    def fit(self, x, y, M=50, multistart=10):
+    def fit(self, x, y, M=50):
         """
         SparseGP fitting through greedy algorithm and constructing matrices for prediction.
 
@@ -64,19 +64,21 @@ class SparseGaussianProcess():
         multistart_vec = [M] * self.nproc
 
         # multiprocessing for multipoint optimization
-        opt_func, opt_theta, opt_xm = run_multiprocessing_optimization(fitoptfunc, 
-                                                                       self, 
-                                                                       init_poin_list, 
-                                                                       multistart_vec, 
-                                                                       extra_args=(True,))
+        opt_func, opt_theta, opt_m_index  = run_multiprocessing_optimization(fitoptfunc, 
+                                                                self, 
+                                                                init_poin_list, 
+                                                                multistart_vec, 
+                                                                extra_args=(True,))
 
         self.kernel.theta = opt_theta[np.nanargmin(opt_func),:-1]
-        self.noise_level  = opt_theta[np.nanargmin(opt_func),-1]
-        self.xm           = opt_xm[np.nanargmin(opt_func)]
+        self.noise_level  = np.exp(opt_theta[np.nanargmin(opt_func),-1])
+        self.M_INDEX      = opt_m_index[np.nanargmin(opt_func)]
 
         # All the matrices used for GP predicition are built
 
         # Kernel computation
+        self.xm = self.x[np.ix_(self.M_INDEX, range(self.dim))]
+
         KMM = self.kernel(self.xm)
         KMN = self.kernel(self.xm, self.x)
 
@@ -127,14 +129,14 @@ class SparseGaussianProcess():
                                  self.y_train_std, None, standardized)
             
     def set_noise_bounds(self, lb=1e-6, ub=1e-2):
-        self.noise_bounds = np.array([lb, ub])
+        self.noise_bounds = np.array([np.log(lb), np.log(ub)])
 
 
 # -------------------------------------------------------------------
 #  Negative Variational Log Marginal Likelihood Lower Bound
 # -------------------------------------------------------------------
 
-def neg_elbo(theta, gp, xm, eval_gradient=False):
+def neg_elbo(theta, gp, eval_gradient=False):
     """
     Function to compute the Negative Lower Bound on the Log Marginal Likelihood for SparseGP model selection.
 
@@ -151,22 +153,29 @@ def neg_elbo(theta, gp, xm, eval_gradient=False):
     formula of Krasser: https://krasserm.github.io/2020/12/12/gaussian-processes-sparse/
     """
     gp.kernel.theta = theta[:-1]
-    noise_level     = theta[-1]
+    noise_level     = np.exp(theta[-1])
+
+    n_hyp = gp.kernel.theta.shape[0]
+    n_ind = len(gp.M_INDEX)
 
     # Kernel computation
-    KNN = gp.kernel(gp.x)
-    KMM = gp.kernel(xm)
-    KMN = gp.kernel(xm, gp.x)
+    if eval_gradient:
+        KNN, dKNN = gp.kernel(gp.x, eval_gradient=True)  
+    else:
+        KNN = gp.kernel(gp.x, eval_gradient=False) 
+    
+    KMM = KNN[np.ix_(gp.M_INDEX, gp.M_INDEX)]
+    KMN = KNN[np.ix_(gp.M_INDEX, range(gp.ndata))]
 
     # Cholesky decomposition
-    LMM = cholesky(KMM + gp.tych * np.eye(xm.shape[0]),
+    LMM = cholesky(KMM + gp.tych * np.eye(n_ind),
                    lower=True, overwrite_a=True, check_finite=False)          # KMM = LMM @ LMM.TT
     
     D = solve_triangular(LMM, 1/np.sqrt(noise_level) * KMN, 
                            lower=True, overwrite_b=True, check_finite=False)    
     
-    LB = cholesky(np.eye(xm.shape[0]) + D @ D.T,   
-                  lower=True, overwrite_a=True, check_finite=False)           # LB @ LB.T = sigma^2 I + QNN
+    LB = cholesky(np.eye(n_ind) + D @ D.T,   
+                  lower=True, overwrite_a=True, check_finite=False)           
     
     c = solve_triangular(LB, 1/np.sqrt(noise_level) * D @ gp.y_norm,
                          lower=True, overwrite_b=True, check_finite=False)
@@ -183,8 +192,34 @@ def neg_elbo(theta, gp, xm, eval_gradient=False):
         return - log_marg_like
 
     if eval_gradient == True:
-        raise ValueError('Gradient not yet implemented!')
 
+        KMMm1 = compute_cholesky_inverse(LMM)
+        Bm1   = compute_cholesky_inverse(LB)
+        CNN   = 1 / noise_level * (np.eye(gp.ndata) - D.T @ Bm1 @ D)  # Cnn = (noise * Inn + Qnn)^-1
+        u     = CNN @ gp.y_norm
+        QNN   = noise_level * D.T @ D
+
+        dKMM  = dKNN[np.ix_(     gp.M_INDEX,      gp.M_INDEX, range(n_hyp))]
+        dKMN  = dKNN[np.ix_(     gp.M_INDEX, range(gp.ndata), range(n_hyp))]
+        dKNM  = dKNN[np.ix_(range(gp.ndata),      gp.M_INDEX, range(n_hyp))]
+        
+        dQNN  = np.einsum('ijl,jk->ikl', dKNM, KMMm1 @ KMN)
+        dQNN += np.einsum('ij,jkl->ikl', (KMN.T) @ KMMm1, dKMN)
+        dQNN -= np.einsum('ijl,jk->ikl', np.einsum('ij,jkl->ikl', (KMN.T) @ KMMm1, dKMM), KMMm1 @ KMN)
+
+        inner_term = u @ u.T + 1 / noise_level * np.eye(gp.ndata) - CNN
+
+        marg_like_grad  = 0.5 * np.einsum("ij,jik->k", inner_term, dQNN)
+        marg_like_grad -= 0.5 / noise_level * np.einsum("iij->j", dKNN)
+
+        noise_grad  = -0.5 * np.trace(CNN)
+        noise_grad += 0.5 * np.dot(u.T,u)
+        noise_grad += 0.5 * (1/noise_level)**2 * np.trace(KNN - QNN)
+        noise_grad *= noise_level
+
+        marg_like_grad = np.append(marg_like_grad, np.squeeze(noise_grad))
+
+        return - log_marg_like, - marg_like_grad
     
 
 

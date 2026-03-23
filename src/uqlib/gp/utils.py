@@ -512,16 +512,16 @@ def run_multiprocessing_optimization(optimizer_func, gp,
     # unpacking results
     opt_func = np.array([])
     opt_theta = np.empty((0, gp.hyp_lw.shape[0]))
-    if greedy: opt_xm = []
+    if greedy: opt_m_index = []
 
     for n in range(gp.nproc):
         opt_func = np.append(opt_func, results[n][0])
         opt_theta = np.vstack((opt_theta, results[n][1]))
-        if greedy: opt_xm.append(results[n][2])
+        if greedy: opt_m_index.append(results[n][2])
     
     if greedy:
 
-        return opt_func, opt_theta, opt_xm 
+        return opt_func, opt_theta, opt_m_index 
     
     else:
         
@@ -575,27 +575,25 @@ def multistart_opt_wrapper(optimizer_func, multistart, gp, init_set, greedy=Fals
     for i in range(multistart):
 
         if greedy:
+            
             while True:
                 t = np.random.randint(0, gp.ndata-1)
                 if t not in M_INDEX:
                     M_INDEX.append(t)
+                    M_INDEX.sort()
                     break
 
-            xm = gp.x[M_INDEX,:]
-            args = (gp, xm, False)
-            jac = False
+            gp.M_INDEX = M_INDEX            
 
         else:
             init_point = init_set[i, :]
-            args = (gp, True)
-            jac = True
         
         results = minimize(
             optimizer_func,
             init_point,
-            args=args,
+            args=(gp, True,),
             method="L-BFGS-B",
-            jac=jac,
+            jac=True,
             bounds=list(zip(gp.hyp_lw, gp.hyp_up)),
             tol=1e-7,
             options={'disp': False, 'maxfun': 10000}
@@ -617,7 +615,7 @@ def multistart_opt_wrapper(optimizer_func, multistart, gp, init_set, greedy=Fals
 
     if greedy:
 
-        return opt_func[-1], opt_theta[-1,:], xm
+        return opt_func[-1], opt_theta[-1,:], gp.M_INDEX
     
     else:
 
