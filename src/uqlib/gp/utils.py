@@ -19,6 +19,7 @@ from scipy.optimize import minimize
 from scipy.linalg import cho_solve, cholesky
 import multiprocessing
 from itertools import repeat
+import copy
 
 
 # =====================================================================
@@ -103,7 +104,7 @@ def normalize_targets(y, mean, std):
     return y_norm
 
 
-def initialize_gp_metadata(gp, x, y):
+def initialize_gp_metadata(gp, x, y, normalize=True):
     """
     Initialize common metadata attributes used across all GP variants.
     
@@ -150,7 +151,9 @@ def initialize_gp_metadata(gp, x, y):
     gp.y = y
     gp.dim = x.shape[1]
     gp.ndata = x.shape[0]
-    gp.y_norm = normalize_targets(y, gp.y_train_mean, gp.y_train_std)
+
+    if normalize:
+        gp.y_norm = normalize_targets(y, gp.y_train_mean, gp.y_train_std)
 
 
 # =====================================================================
@@ -486,7 +489,7 @@ def run_multiprocessing_optimization(optimizer_func, gp,
     func_args = zip(
         repeat(optimizer_func),
         multistart_vec,
-        repeat(gp),
+        repeat(copy.deepcopy(gp)),
         init_points_list
     )
     
@@ -626,7 +629,7 @@ def multistart_opt_wrapper(optimizer_func, multistart, gp, init_set, greedy=Fals
 # 6. CHOLESKY OPERATIONS UTILITIES
 # =====================================================================
 
-def solve_cholesky_system(K, y, tych=0.0):
+def solve_cholesky_system(K, y, tych=0.0, lower=True):
     """
     Solve a system using Cholesky decomposition with optional regularization.
     
@@ -676,8 +679,8 @@ def solve_cholesky_system(K, y, tych=0.0):
     n = K.shape[0]
     K_reg = K + tych * np.eye(n)
     
-    L = cholesky(K_reg, lower=True, overwrite_a=True, check_finite=False)
-    alpha = cho_solve((L, True), y, check_finite=False)
+    L = cholesky(K_reg, lower=lower, overwrite_a=True, check_finite=False)
+    alpha = cho_solve((L, lower), y, check_finite=False)
     
     return L, alpha
 

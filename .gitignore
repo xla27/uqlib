@@ -4,4 +4,7 @@ uqlib.egg-info/
 *.svg
 *.pdf
 test*
+.debug/
+.vscode/
+*.md
 
