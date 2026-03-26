@@ -12,7 +12,7 @@ from .utils import (
 #  Gaussian Process Class
 # -------------------------------------------------------------------
 
-class GaussianProcess():
+class GaussianProcessRegressor():
 
     """
     Class for Gaussian Process regression from Rasmussen and Williams.
