@@ -111,11 +111,10 @@ class PCE():
             # coeffs = (npoly x noutputs) array
             self.coeffs = ATWAinv @ self.A.T @ self.W @ self.y_train   
 
-            # utilitiess for loo
-            h_loo = np.diag(self.A @ ATWAinv @ self.A.T @ self.W)
-            utility_loo = np.ones(h_loo.shape) - h_loo
-            self.h_loo = h_loo
-            self.utility_loo = np.repeat(utility_loo[:,np.newaxis], repeats=self.noutputs, axis=1)
+            # utilities for loo from Sudret
+            self.h_loo          = np.diag(self.A @ ATWAinv @ self.A.T @ self.W)
+            utility_loo         = np.ones(self.h_loo.shape) - self.h_loo
+            self.utility_loo    = np.repeat(utility_loo[:,np.newaxis], repeats=self.noutputs, axis=1)
 
         elif method == 'QUAD':
 

@@ -47,7 +47,7 @@ class MFPCE():
 
         return
 
-    def compute_coeffs(self, doe, method):
+    def compute_coeffs(self, doe, method, nested=False, r2_check=False):
         """
         doe is a NestedDoE object
 
@@ -69,6 +69,9 @@ class MFPCE():
             _, self.noutputs = y_train.shape
 
         pce_lf.compute_coeffs(X_train, y_train, method=method)
+
+        if r2_check:
+            r2 = [pce_lf.r2_score()]
         
         for i_lev in range(1, self.nlevels):
 
@@ -81,7 +84,10 @@ class MFPCE():
             X_train, y_train = doe.level(i_lev, return_y=True)
 
             # discrepancy wrt lower PCE prediction
-            y_lf = pce_lf.predict(X_train)
+            if nested:
+                y_lf = doe.nestedlevel(i_lev, i_lev-1)[1][:,0]
+            else:
+                y_lf = pce_lf.predict(X_train)
 
             if self.noutputs == 1: 
                 y_lf = y_lf[:,np.newaxis]
@@ -91,13 +97,20 @@ class MFPCE():
 
             pce_i.compute_coeffs(X_train, disc_train, method=method)
 
+            if r2_check:
+                r2.append(pce_i.r2_score())
+
             # updating the pce_lf
             pce_lf = self._update_pce(pce_lf, pce_i)
 
         # assigning the correct attributes (multindices, polynomials and coefficients)
         self.multindices = pce_lf.multindices
         self.polynomials = pce_lf.polynomials
-        self.coeffs      = pce_lf.coeffs            
+        self.coeffs      = pce_lf.coeffs     
+
+        if r2_check:
+
+            return r2      
 
     def moments(self):
         '''
