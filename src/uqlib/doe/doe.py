@@ -6,6 +6,8 @@ from scipy.stats    import qmc, norm, uniform
 from scipy.special import roots_legendre, roots_hermitenorm, roots_genlaguerre
 from scipy.spatial.distance import cdist
 
+from .scaler import PCEDataScaler
+
 
 # -------------------------------------------------------------------
 #  DOE class
@@ -127,6 +129,47 @@ class PCEDoE():
             'use the the update() method!')
         else:
             self.y = y
+
+    def save(self, names, bounds, filename, dimensional=False):
+
+        if dimensional:
+           
+            scaler = PCEDataScaler(self.pdf_var, 
+                                   np.array(bounds[:,0]),
+                                   np.array(bounds[:,1]))
+            
+            X = scaler.inverse_transform(self.X)
+
+        else:
+
+            X = self.X
+
+        with open(filename, 'w') as f:
+
+            f.write('Method:\t' + self.method)
+            f.write('\nDim:\t' + str(self.dim))
+            f.write('\nSamples:\t' + str(self.X.shape[0]))
+
+            f.write('\n\nUncertain inputs (pdf, name, bounds)')
+
+            for i_var, pdf in enumerate(self.pdf_var):
+                f.write(f'\n{pdf}\t{names[i_var]}\t{bounds[i_var,0]}\t{bounds[i_var,1]}')
+
+            f.write('\n')
+
+            if dimensional:
+                f.write('\nVariables are dimensional')
+            else:
+                f.write('\nVariables are reduced')
+
+            f.write('\n')
+        
+
+            for i in range(X.shape[0]):
+                line = '\n'+'\t\t'.join(f'{x:.12f}' for x in X[i,:]) 
+                if self.method == 'QUADRATURE':
+                    line += f'\t\t{self.weights[i]:.12f}'
+                f.write(line)
     
 
 # -------------------------------------------------------------------
@@ -259,6 +302,47 @@ class NestedPCEDoE(PCEDoE):
                               y_high.reshape(ndata,1)))
 
         return X_nested, y_nested
+    
+    def save(self, names, bounds, filename, dimensional=False):
+
+        if dimensional:
+           
+            scaler = PCEDataScaler(self.pdf_var, 
+                                   np.array(bounds[:,0]),
+                                   np.array(bounds[:,1]))
+            
+            X = scaler.inverse_transform(self.X)
+
+        else:
+
+            X = self.X
+
+        with open(filename, 'w') as f:
+
+            f.write('Method:\t' + self.method)
+            f.write('\nDim:\t' + str(self.dim))
+            f.write('\nLevels:\t' + str(self.nlevel))
+            f.write('\nSamples per level (low to high):\t' + f'{n:.12f}' for n in self.ndata_per_level)
+
+            f.write('\n\nUncertain inputs (pdf, name, bounds)')
+
+            for i_var, pdf in enumerate(self.pdf_var):
+                f.write(f'\n{pdf}\t{names[i_var]}\t{bounds[i_var,0]}\t{bounds[i_var,1]}')
+
+            f.write('\n')
+
+            if dimensional:
+                f.write('\nVariables are dimensional')
+            else:
+                f.write('\nVariables are reduced')
+
+            f.write('\n')
+        
+
+            for i in range(X.shape[0]):
+                line = '\n'+'\t\t'.join(f'{x:.12f}' for x in X[i,:]) 
+                line += f'\t\t{np.sum(self.DL[i,:]):.1d}'
+                f.write(line)
     
 
 
