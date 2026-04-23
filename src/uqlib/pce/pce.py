@@ -116,6 +116,8 @@ class PCE():
             utility_loo         = np.ones(self.h_loo.shape) - self.h_loo
             self.utility_loo    = np.repeat(utility_loo[:,np.newaxis], repeats=self.noutputs, axis=1)
 
+            self.correction = self.ndata / (self.ndata - len(self.multindices)) * (1 + np.linalg.trace(ATWAinv) / self.ndata)
+
         elif method == 'QUAD':
 
             if weights is None:
@@ -312,7 +314,7 @@ class PCE():
         if not hasattr(self, 'err_l2'):
             self.compute_err_l2()
 
-        self.err_mse = self.err_l2 / self.ndata
+        self.err_mse = self.correction * self.err_l2 / self.ndata
 
         return self.err_mse
     
