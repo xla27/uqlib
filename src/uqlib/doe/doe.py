@@ -170,7 +170,69 @@ class PCEDoE():
                 if self.method == 'QUADRATURE':
                     line += f'\t\t{self.weights[i]:.12f}'
                 f.write(line)
-    
+
+    def load(self, filename):
+
+        with open(filename, 'r') as f:
+            lines = f.readlines()
+
+        for i, line in enumerate(lines):
+
+            if 'Variables are ' in line:
+
+                header_lines = lines[:(i+1)]
+
+                dimensional = True if 'dimensional' in line else False
+
+                data_lines = lines[(i+1):]
+
+                break
+
+        # processing header
+        self.method = header_lines[0].split(':')[1]
+        self.dim    = int(header_lines[1].split(':')[1])
+        self.ndata  = int(header_lines[2].split(':')[1])
+
+        self.pdf_var = []
+        bounds = np.zeros((self.dim, 2))
+
+        for i in range(self.dim):
+            pdf, name, par1, par2 = header_lines[5+i].strip('\n').split('\t')
+
+            self.pdf_var.append(pdf)
+
+            bounds[i,0] = float(par1)
+            bounds[i,1] = float(par2)
+
+        if dimensional: scaler = PCEDataScaler(self.pdf_var, bounds[:,0], bounds[:,1])
+
+        # processing data
+        X = np.empty((0, self.dim))
+        w = []
+
+        for line in data_lines:
+
+            if line.strip():
+
+                vals = line.split('\t\t')
+
+                if len(vals) >= self.dim:
+
+                    x = np.array([[float(val) for val in vals[:self.dim]]])
+                    
+                    X = np.vstack((X, x))
+
+                    if self.method == 'QUADRATURE':
+
+                        w.append(float(vals[-1]))
+
+                    else:
+
+                        w.append(1.0)
+
+        self.X = scaler.transform(X) if dimensional else X
+
+        self.weights = np.array(w)    
 
 # -------------------------------------------------------------------
 #  Nested DOE class (Le Gratiet algorithm)
@@ -322,7 +384,7 @@ class NestedPCEDoE(PCEDoE):
             f.write('Method:\t' + self.method)
             f.write('\nDim:\t' + str(self.dim))
             f.write('\nLevels:\t' + str(self.nlevel))
-            f.write('\nSamples per level (low to high):\t' + f'{n:.12f}' for n in self.ndata_per_level)
+            f.write('\nSamples per level (low to high):\t' + f'{n:.12f}\t' for n in self.ndata_per_level)
 
             f.write('\n\nUncertain inputs (pdf, name, bounds)')
 
@@ -344,6 +406,71 @@ class NestedPCEDoE(PCEDoE):
                 line += f'\t\t{np.sum(self.DL[i,:]):.1d}'
                 f.write(line)
     
+    def load(self, filename):
 
+        with open(filename, 'r') as f:
+            lines = f.readlines()
+
+        for i, line in enumerate(lines):
+
+            if 'Variables are ' in line:
+
+                header_lines = lines[:(i+1)]
+
+                dimensional = True if 'dimensional' in line else False
+
+                data_lines = lines[(i+1):]
+
+                break
+
+        # processing header
+        self.method = header_lines[0].split(':')[1]
+        self.dim    = int(header_lines[1].split(':')[1])
+        self.nlevel = int(header_lines[2].split(':')[1])
+
+        line  = header_lines[4].split(':')[1]
+        self.ndata_per_level = [int(n) for n in line.strip().split('\t')]
+
+        self.pdf_var = []
+        bounds = np.zeros((self.dim, 2))
+
+        for i in range(self.dim):
+            pdf, name, par1, par2 = header_lines[6+i].strip('\n').split('\t')
+
+            self.pdf_var.append(pdf)
+
+            bounds[i,0] = float(par1)
+            bounds[i,1] = float(par2)
+
+        if dimensional: scaler = PCEDataScaler(self.pdf_var, bounds[:,0], bounds[:,1])
+
+        # processing data
+        X  = np.empty((0, self.dim))
+        DL = np.empty((0, self.dim))
+
+        for line in data_lines:
+
+            if line.strip():
+
+                vals = line.split('\t\t')
+
+                if len(vals) >= self.dim:
+
+                    x = np.array([[float(val) for val in vals[:self.dim]]])
+                    
+                    X = np.vstack((X, x))
+                    
+                    lev = int(vals[-1])
+
+                    dl = np.zeros(self.nlevel)
+
+                    for l in range(lev): dl[l] = 1
+
+                    DL = np.vstack((DL, dl))
+
+
+        self.X = scaler.transform(X) if dimensional else X
+
+        self.DL = DL   
 
 
