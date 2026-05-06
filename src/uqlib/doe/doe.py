@@ -131,6 +131,20 @@ class PCEDoE():
             self.y = y
 
     def save(self, names, bounds, filename, dimensional=False):
+        '''
+        Method to save the DoE in a ASCII format.
+        Contains info about:
+        - sampling method
+        - inputs PDFs 
+        - corresponding weights (if needed by the sampling method)
+        - corresponding outputs (if already observed)
+
+        Inputs:
+        - names - list of variables names
+        - bounds - (N,2) array of parameters of the 1D PDFs, e.g., low and upper bound, mean and variance
+        - filename - string
+        - dimensional - bool if the inputs are written dimensionally (default False)
+        '''
 
         if dimensional:
            
@@ -143,6 +157,8 @@ class PCEDoE():
         else:
 
             X = self.X
+
+        print_y = True if hasattr(self, 'y') else False
 
         with open(filename, 'w') as f:
 
@@ -157,21 +173,27 @@ class PCEDoE():
 
             f.write('\n')
 
-            if dimensional:
-                f.write('\nVariables are dimensional')
-            else:
-                f.write('\nVariables are reduced')
+            line = '\nVariables are dimensional\t' if dimensional else '\nVariables are reduced\t'
+            line += f'(inputs first {self.dim} columns'
+            line += f', weights {self.dim+1} column' if self.method == 'QUADRATURE' else ''
+            line += f', outputs last column' if print_y else ''
+            line += ')'
+            f.write(line)
 
             f.write('\n')
         
-
             for i in range(X.shape[0]):
+
                 line = '\n'+'\t\t'.join(f'{x:.12f}' for x in X[i,:]) 
-                if self.method == 'QUADRATURE':
-                    line += f'\t\t{self.weights[i]:.12f}'
+                line += f'\t\t{self.weights[i]:.12f}' if self.method == 'QUADRATURE' else ''
+                line += f'\t\t{self.y[i]:.12f}' if print_y else ''
+
                 f.write(line)
 
     def load(self, filename):
+        '''
+        Method to populate the DoE object from a previously saved file.
+        '''
 
         with open(filename, 'r') as f:
             lines = f.readlines()
@@ -184,12 +206,16 @@ class PCEDoE():
 
                 dimensional = True if 'dimensional' in line else False
 
+                append_w = True if 'weights' in line else False
+
+                append_y = True if 'outputs' in line else False
+
                 data_lines = lines[(i+1):]
 
                 break
 
         # processing header
-        self.method = header_lines[0].split(':')[1]
+        self.method = header_lines[0].split(':')[1].lstrip('\t').rstrip('\n')
         self.dim    = int(header_lines[1].split(':')[1])
         self.ndata  = int(header_lines[2].split(':')[1])
 
@@ -209,6 +235,7 @@ class PCEDoE():
         # processing data
         X = np.empty((0, self.dim))
         w = []
+        y = []
 
         for line in data_lines:
 
@@ -222,17 +249,15 @@ class PCEDoE():
                     
                     X = np.vstack((X, x))
 
-                    if self.method == 'QUADRATURE':
-
-                        w.append(float(vals[-1]))
-
-                    else:
-
-                        w.append(1.0)
+                    if append_w: w.append(float(vals[self.dim])) 
+                    
+                    if append_y: y.append(float(vals[-1])) 
 
         self.X = scaler.transform(X) if dimensional else X
 
-        self.weights = np.array(w)    
+        self.weights = np.array(w) if append_w else np.ones(X.shape[0])
+
+        if append_y: self.set_y(np.array(y))
 
 # -------------------------------------------------------------------
 #  Nested DOE class (Le Gratiet algorithm)
@@ -366,6 +391,20 @@ class NestedPCEDoE(PCEDoE):
         return X_nested, y_nested
     
     def save(self, names, bounds, filename, dimensional=False):
+        '''
+        Method to save the DoE in a ASCII format.
+        Contains info about:
+        - sampling method
+        - inputs PDFs 
+        - corresponding outputs (if already observed)
+        - levels at which the user has to observe outputs if not done yet 
+
+        Inputs:
+        - names - list of variables names
+        - bounds - (N,2) array of parameters of the 1D PDFs, e.g., low and upper bound, mean and variance
+        - filename - string
+        - dimensional - bool if the inputs are written dimensionally (default False)
+        '''
 
         if dimensional:
            
@@ -379,12 +418,16 @@ class NestedPCEDoE(PCEDoE):
 
             X = self.X
 
+        print_y = True if hasattr(self, 'y') else False
+
         with open(filename, 'w') as f:
 
             f.write('Method:\t' + self.method)
             f.write('\nDim:\t' + str(self.dim))
             f.write('\nLevels:\t' + str(self.nlevel))
-            f.write('\nSamples per level (low to high):\t' + f'{n:.12f}\t' for n in self.ndata_per_level)
+            line = '\nSamples per level (low to high):\t'
+            for n in self.ndata_per_level: line += str(n)+'\t'
+            f.write(line)
 
             f.write('\n\nUncertain inputs (pdf, name, bounds)')
 
@@ -393,20 +436,36 @@ class NestedPCEDoE(PCEDoE):
 
             f.write('\n')
 
-            if dimensional:
-                f.write('\nVariables are dimensional')
+            line = '\nVariables are dimensional\t' if dimensional else '\nVariables are reduced\t'
+            line += f'(inputs first {self.dim} columns'
+            if print_y:
+                line += ', outputs lev. '+', '.join([str(l) for l in range(self.nlevel)]) +' last columns'
             else:
-                f.write('\nVariables are reduced')
+                line += ', datalevel last column'
+            line += ')'
+            f.write(line)
 
             f.write('\n')
-        
 
             for i in range(X.shape[0]):
+
                 line = '\n'+'\t\t'.join(f'{x:.12f}' for x in X[i,:]) 
-                line += f'\t\t{np.sum(self.DL[i,:]):.1d}'
+
+                if print_y:
+                    for l in range(self.nlevel):
+                        try:
+                            line += f'\t\t{self.y[l][i]:.12f}'
+                        except:
+                            continue
+                else:
+                    line += f'\t\t{np.sum(self.DL[i,:])}'
+
                 f.write(line)
     
     def load(self, filename):
+        '''
+        Method to populate the DoE object from a previously saved file.
+        '''
 
         with open(filename, 'r') as f:
             lines = f.readlines()
@@ -419,16 +478,18 @@ class NestedPCEDoE(PCEDoE):
 
                 dimensional = True if 'dimensional' in line else False
 
+                append_y = True if 'outputs' in line else False
+
                 data_lines = lines[(i+1):]
 
                 break
 
         # processing header
-        self.method = header_lines[0].split(':')[1]
+        self.method = header_lines[0].split(':')[1].lstrip('\t').rstrip('\n')
         self.dim    = int(header_lines[1].split(':')[1])
         self.nlevel = int(header_lines[2].split(':')[1])
 
-        line  = header_lines[4].split(':')[1]
+        line  = header_lines[3].split(':')[1]
         self.ndata_per_level = [int(n) for n in line.strip().split('\t')]
 
         self.pdf_var = []
@@ -447,6 +508,7 @@ class NestedPCEDoE(PCEDoE):
         # processing data
         X  = np.empty((0, self.dim))
         DL = np.empty((0, self.dim))
+        y  = [np.empty(0)] * self.nlevel
 
         for line in data_lines:
 
@@ -459,18 +521,30 @@ class NestedPCEDoE(PCEDoE):
                     x = np.array([[float(val) for val in vals[:self.dim]]])
                     
                     X = np.vstack((X, x))
-                    
-                    lev = int(vals[-1])
 
                     dl = np.zeros(self.nlevel)
 
-                    for l in range(lev): dl[l] = 1
+                    if append_y:
+
+                        for l in range(self.nlevel): 
+                            try:
+                                y[l] = np.append(y[l], float(vals[self.dim+l]))
+                                dl[l] = 1
+                            except:
+                                continue
+
+                    else:
+
+                        lev = int(vals[-1])
+
+                        for l in range(lev): dl[l] = 1 
 
                     DL = np.vstack((DL, dl))
-
 
         self.X = scaler.transform(X) if dimensional else X
 
         self.DL = DL   
+
+        if append_y: self.set_y(y)
 
 
