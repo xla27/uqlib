@@ -52,8 +52,6 @@ class PODPCE():
         self.modes = U[:,:self.pod_degree]             # POD modes (Nxd) array
         self.latent = self.modes.T @ self.snapshots.T  # latent basis (dxM) array
 
-        return
-
     def compute_pce(self, X, method, weights=None):
 
         if not hasattr(self, 'latent'):
@@ -87,4 +85,4 @@ class PODPCE():
 
         Y_pred += np.transpose( self.modes @ self.pce.predict(X).T )
 
-        return Y_pred
+        return np.squeeze(Y_pred)

@@ -1,6 +1,6 @@
 import os, sys, shutil
 import numpy as np
-from scipy.linalg import svd, eigh, eig, cholesky, cho_solve, eigvalsh
+from scipy.linalg import svd, eigh, eig, cholesky, cho_solve, eigvalsh, solve
 from scipy.spatial.distance import pdist, cdist, squareform
 from scipy.stats import qmc, norm, uniform
 from scipy.sparse import csr_matrix
@@ -42,14 +42,14 @@ class ISOMAPPCE():
         # removing the mean
         snapshots = Y
 
-        # looping to finde the optimal k_near
+        # looping to find the optimal k_near
         k_max = max(int(np.log10(self.ndata) * 10) , self.ndata-1)
         k_list = [k for k in range(1, k_max)]
         kruskal_list = []
         eigvals_list = []
         eigvecs_list = []
 
-        for i_k, k_near in enumerate(k_list):
+        for k_near in k_list:
 
             try:
 
@@ -59,12 +59,16 @@ class ISOMAPPCE():
                 elif distance == 'euclidean':
                     D = squareform(pdist(snapshots, metric='euclidean'))
 
+                D_tilde = -0.5 * D**2
+
                 # Centering the square of D i.e., D_tilde
                 H = np.eye(self.ndata) - 1/self.ndata * np.ones((self.ndata, self.ndata))
-                B = - H @ D**2 @ H
+                B = H @ D_tilde @ H
 
                 # eigendecomposing B
                 eigvals_k, eigvecs_k = eigh(B, subset_by_value=[0.0, np.inf], driver='evr')
+
+                eigvals_k[eigvals_k < 0] = 0.0
 
                 Z_tilde = eigvecs_k @ np.diag(np.sqrt(eigvals_k))
 
@@ -85,8 +89,10 @@ class ISOMAPPCE():
         ind_opt = np.nanargmin(np.array(kruskal_list))
 
         self.k_near = k_list[ind_opt]
-        eigvals_opt = eigvals_list[ind_opt]
-        eigvecs_opt = eigvecs_list[ind_opt]
+
+        idx_sort = np.argsort(eigvals_list[ind_opt])[::-1]
+        eigvals_opt = eigvals_list[ind_opt][idx_sort]
+        eigvecs_opt = eigvecs_list[ind_opt][:, idx_sort]
 
         # relative information content to cut additional modes if unnecessary
         d = 1
@@ -150,7 +156,7 @@ class ISOMAPPCE():
             # prediction as weighted linear linear combination of the near snaps 
             Y_pred[smp,:] += self.snapshots[neigh_indices, :].T @ w_opt 
 
-        return Y_pred
+        return np.squeeze(Y_pred)
     
     def _sample_x(self, n_samples):
         '''
@@ -187,37 +193,33 @@ class ISOMAPPCE():
         if not (0 < k_near < self.ndata):
             raise ValueError("k must satisfy 0 < k < M (number of samples)")
         
-        # 1 & 2: Nearest neighbors using Euclidean distances
-        nn = NearestNeighbors(n_neighbors=k_near, 
-                              metric='euclidean', 
-                              algorithm='auto')
-        nn.fit(Y)
-        distances, indices = nn.kneighbors(Y)   # shapes: (M, k)
+        # Pairwise Euclidean distance
+        D_euclid = cdist(Y, Y, metric='euclidean')
         
-        # 3: Build sparse adjacency (directed from i -> neighbor_j with weight = distance)
-        rows = np.repeat(np.arange(self.ndata), k_near)
-        cols = indices.ravel()
-        data = distances.ravel()
-        adj = csr_matrix((data, (rows, cols)), shape=(self.ndata, self.ndata))
+        # Nearest neighbors using Euclidean distances
+        G = np.full((self.ndata, self.ndata), np.inf)
+
+        for i in range(self.ndata):
+
+            # Exclude the point itself and get k nearest neighbors
+            neighbors = np.argsort(D_euclid[i])[1:k_near+1]
+
+            # Assign edge weights
+            G[i, neighbors] = D_euclid[i, neighbors]
         
-        # If user wants undirected graph, make symmetric by taking the minimum weight where both exist.
-        if symmetric:
-            # adj.minimum(adj.T) yields elementwise minimum (keeps zeros if no edge both ways)
-            adj = adj.minimum(adj.T)
-            # If adjacency has zeros where no edge existed, they remain 0; set explicit zeros on diagonal
-            adj.setdiag(0)
+        # Make graph symmetric (undirected)
+        G = np.minimum(G, G.T)
+
+        # Zero diagonal
+        np.fill_diagonal(G, 0.0)
         
-        # 4: All-pairs shortest paths (Dijkstra). Use undirected flag if symmetric, else directed.
-        directed_flag = not symmetric
-        dist_matrix = shortest_path(csgraph=adj, 
-                                    method='D', 
-                                    unweighted=False, 
-                                    directed=directed_flag, 
-                                    return_predecessors=False)
-        # dist_matrix[i,j] is shortest-path distance from i to j (sum of Euclidean distances on path),
-        # np.inf indicates no path between nodes.
+        D_geo = shortest_path(
+            csgraph=G,
+            directed=False,
+            method='D'
+            )
         
-        return dist_matrix
+        return D_geo
         
     def _kruskal_stress(self, D, Z_tilde):
         '''
@@ -259,7 +261,8 @@ class ISOMAPPCE():
         G_tilde = G + np.diag(c)
         A = 2*G_tilde
         
-        # solution of the constrained optimization problem
+        # solution of the quadratic constrained optimization problem 
+        # w.T @ A @ w s.t. \sum w_i = 1
         while True:
             try:
                 L = cholesky(A, lower=True)
@@ -269,9 +272,11 @@ class ISOMAPPCE():
                 A = V @ np.diag(np.clip(l, a_min=1e-8, a_max=None)) @ V.T
                 i+=1
 
+        one_vec = np.ones(len(neigh_indices))
         inv = cho_solve((L,True), np.eye(len(neigh_indices)))
-        S = - np.ones(len(neigh_indices)).T @ inv @ np.ones(len(neigh_indices))
-        w_opt = - 1/S * inv @ np.ones(len(neigh_indices))  
+        AinvOnes = inv @ one_vec
+        S = one_vec.T @ AinvOnes
+        w_opt = 1/S * AinvOnes
 
         return w_opt, neigh_indices
 
