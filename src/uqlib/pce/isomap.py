@@ -5,7 +5,6 @@ from scipy.spatial.distance import pdist, cdist, squareform
 from scipy.stats import qmc, norm, uniform
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import shortest_path
-from sklearn.neighbors import NearestNeighbors
 
 from . import PCE
 
@@ -68,8 +67,6 @@ class ISOMAPPCE():
                 # eigendecomposing B
                 eigvals_k, eigvecs_k = eigh(B, subset_by_value=[0.0, np.inf], driver='evr')
 
-                eigvals_k[eigvals_k < 0] = 0.0
-
                 Z_tilde = eigvecs_k @ np.diag(np.sqrt(eigvals_k))
 
                 # computing the Kruskal's stress (for optimum k)
@@ -95,18 +92,17 @@ class ISOMAPPCE():
         eigvecs_opt = eigvecs_list[ind_opt][:, idx_sort]
 
         # relative information content to cut additional modes if unnecessary
-        d = 1
         for d in range(1, eigvals_opt.shape[0]+1):
             ric = np.sum(eigvals_opt[:d]**2) / np.sum(eigvals_opt**2)
             if ric > delta:
                 self.isomap_degree = d     # latent space dimensionality
                 break
-        self.isomap_degree = eigvals_opt.shape[0]
+
         self.snapshots = snapshots
 
-        self.eigvals = eigvals_opt[:self.isomap_degree]                        # (d,) array
-        self.eigvecs = eigvecs_opt[:,:self.isomap_degree]                      # (M,d) array
-        self.latent  = (self.eigvecs @ np.diag(np.sqrt(self.eigvals))).T       # (d, M) array
+        eigvals_iso = eigvals_opt[:self.isomap_degree]                        # (d,) array
+        eigvecs_iso = np.atleast_2d(eigvecs_opt[:,:self.isomap_degree])       # (M,d) array
+        self.latent  = (eigvecs_iso @ np.diag(np.sqrt(eigvals_iso))).T       # (d, M) array
     
     def compute_pce(self, X, method, weights=None):
 
@@ -146,7 +142,15 @@ class ISOMAPPCE():
         Y_pred = np.zeros((nsamples, self.noutputs))
 
         # predicting the latent variable through PCE 
-        Z_pred = np.atleast_2d( self.pce.predict(X) )
+        Z_pred = self.pce.predict(X) 
+
+        # fixing Z_pred size
+        if nsamples == 1 and self.isomap_degree == 1:
+            Z_pred = np.atleast_2d(Z_pred)
+        elif nsamples > 1 and self.isomap_degree == 1:
+            Z_pred = Z_pred[:,np.newaxis]
+        elif nsamples == 1 and self.isomap_degree > 1:
+            Z_pred = np.atleast_2d(Z_pred)
 
         for smp in range(nsamples):
 
@@ -238,23 +242,21 @@ class ISOMAPPCE():
         The solution exploits the Schur complement, see Franz et al..
         '''
 
-        # finding k-nearest neighbors of z_pred
-        nn = NearestNeighbors(n_neighbors=self.k_near, 
-                              metric='euclidean', 
-                              algorithm='auto')
-        nn.fit(self.latent.T)
-        neigh_indices = np.squeeze( nn.kneighbors( np.atleast_2d(z_pred), return_distance=False) )
+        # Pairwise Euclidean distance between z_pred and training samples in latent space
+        D_euclid = np.squeeze(cdist(np.atleast_2d(z_pred), self.latent.T, metric='euclidean'))
 
-        neighs = self.latent[:, neigh_indices]
+        neigh_indices = np.argsort(D_euclid)[:self.k_near]
+
+        z_neighs = self.latent[:, neigh_indices]
 
         # gram matrix G
         tmp = np.repeat(np.atleast_2d(z_pred).T, repeats=len(neigh_indices), axis=1)
-        G = (tmp - neighs).T @ (tmp - neighs) 
+        G = (tmp - z_neighs).T @ (tmp - z_neighs) 
 
         # regularization coeffs
         c = np.zeros(self.k_near)
         for i in range(self.k_near):
-            c[i] = np.linalg.norm(z_pred - neighs[:,i], 2.0)
+            c[i] = np.linalg.norm(z_pred - z_neighs[:,i], 2.0)
         c = 0.01 * (c / np.amax(c))**4.0
 
         # forcing the regularization term
@@ -263,6 +265,7 @@ class ISOMAPPCE():
         
         # solution of the quadratic constrained optimization problem 
         # w.T @ A @ w s.t. \sum w_i = 1
+        # W_opt = (Ainv @ 1) / (1.T @ Ainv @ 1)
         while True:
             try:
                 L = cholesky(A, lower=True)
@@ -270,11 +273,10 @@ class ISOMAPPCE():
             except:
                 l, V = eigh(A)
                 A = V @ np.diag(np.clip(l, a_min=1e-8, a_max=None)) @ V.T
-                i+=1
 
         one_vec = np.ones(len(neigh_indices))
-        inv = cho_solve((L,True), np.eye(len(neigh_indices)))
-        AinvOnes = inv @ one_vec
+        Ainv = cho_solve((L,True), np.eye(len(neigh_indices)))
+        AinvOnes = Ainv @ one_vec
         S = one_vec.T @ AinvOnes
         w_opt = 1/S * AinvOnes
 
