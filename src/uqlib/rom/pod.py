@@ -5,6 +5,9 @@ from scipy.linalg import svd
 from scipy.stats import qmc, norm, uniform
 import copy
 
+from SALib.sample import sobol as sob_sample
+from SALib.analyze import sobol as sob_analyze
+
 from ..pce import PCE
 from ..gp  import GaussianProcessRegressor 
 
@@ -66,6 +69,66 @@ class POD():
         Y_pred += self.predict_latent(X) @ self.modes.T
 
         return np.squeeze(Y_pred)
+    
+    def sobol(self, calc_second=False, return_total=False, n_mc=1024, nproc=1):
+        '''
+        Sobol' indices estimation through Saltelli's sampling
+        '''
+        # problem definition (SALib)
+        sobol_problem = {
+            'num_vars': self.uq_dim,
+            'names'   : [f'x{i+1}' for i in range(self.uq_dim)]
+        }
+
+        for _, var in enumerate(self.pdf_var):
+
+            if var == 'U':
+                sobol_problem['bounds'].append([-1.0, 1.0])
+                sobol_problem['dists'].append('unif')
+
+            elif var == 'N':
+                sobol_problem['bounds'].append([0.0, 1.0])
+                sobol_problem['dists'].append('norm') 
+
+        # samples generation in UQ space
+        X_sobol = sob_sample.sample(sobol_problem,
+                                    n_mc,
+                                    calc_second_order=calc_second)
+        
+        # FOM prediction
+        Y_sobol = self.predict(X_sobol)
+
+        # computing Sobol' indices
+        s1 = np.zeros((self.uq_dim, self.fom_dim))
+        st = np.zeros((self.uq_dim, self.fom_dim))
+        if calc_second:
+            s2 = np.zeros((int(self.uq_dim * (self.uq_dim - 1) / 2), self.fom_dim)) 
+
+        for i_out in range(self.fom_dim):
+
+            s = sob_analyze.analyze(sobol_problem, 
+                              Y_sobol[:,i_out], 
+                              calc_second_order=calc_second,
+                              n_processors=nproc)
+            
+            s1[:,i_out] = s['S1']
+            st[:,i_out] = s['ST']
+            if calc_second:
+                s2[:,i_out] = s['S2']
+
+        if calc_second:
+
+            if return_total:
+                return s1, s2, st
+            else:
+                return s1, s2
+            
+        else:
+
+            if return_total:
+                return s1, st
+            else:
+                return s1
 
 
 
