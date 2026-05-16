@@ -1,34 +1,37 @@
-import os, sys, shutil
+import os, sys, copy
 import numpy as np
+from abc import abstractmethod
 from scipy.linalg import svd, eigh, eig, cholesky, cho_solve, eigvalsh, solve
 from scipy.spatial.distance import pdist, cdist, squareform
 from scipy.stats import qmc, norm, uniform
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import shortest_path
 
-from . import PCE
+from ..pce import PCE
+from ..gp  import GaussianProcessRegressor
 
 np.set_printoptions(threshold=sys.maxsize)
 
-class ISOMAPPCE():
+class ISOMAP():
     '''
     Nomenclature:
     - X are the random input variables of the model
+        size: uq_dim
     - Y is the full-order output of the computational model
-    - Z is the set of latent variables (obtained through isomap)
+        size: fom_dim 
+    - Z is the set of latent variables
+        size: rom_dim
     '''
 
-    def __init__(self, dim, degree, pdf_var, truncation):
+    def __init__(self):
 
-        self.dim     = dim
-        self.pdf_var = pdf_var
-
-        # building a PCE object
-        self.pce = PCE(dim, degree, pdf_var, truncation)
+        self.uq_dim = None
+        self.pdf_var = None
+        return
         
     def compute_isomap(self, Y, delta=0.9999, distance='geodesic'):
         '''
-        Z is an (M x N) array with:
+        Y is an (M x N) array with:
         - M number of snaphsots
         - N output size of the computational model
         '''
@@ -36,10 +39,10 @@ class ISOMAPPCE():
         if Y.ndim != 2:
             raise ValueError("Y must be 2D array of shape (M, N)")
         
-        self.ndata, self.noutputs = Y.shape
+        self.ndata, self.fom_dim = Y.shape
 
         # removing the mean
-        snapshots = Y
+        self.Y_train = Y
 
         # looping to find the optimal k_near
         k_max = max(int(np.log10(self.ndata) * 10) , self.ndata-1)
@@ -54,9 +57,12 @@ class ISOMAPPCE():
 
                 # computing the dissimilarity matrix
                 if distance == 'geodesic':
-                    D = self._compute_dissimilarity(snapshots, k_near)
+
+                    D = self._compute_dissimilarity(self.Y_train, k_near)
+
                 elif distance == 'euclidean':
-                    D = squareform(pdist(snapshots, metric='euclidean'))
+
+                    D = squareform(pdist(self.Y_train, metric='euclidean'))
 
                 D_tilde = -0.5 * D**2
 
@@ -95,37 +101,29 @@ class ISOMAPPCE():
         for d in range(1, eigvals_opt.shape[0]+1):
             ric = np.sum(eigvals_opt[:d]**2) / np.sum(eigvals_opt**2)
             if ric > delta:
-                self.isomap_degree = d     # latent space dimensionality
+                self.rom_dim = d     # latent space dimensionality
                 break
 
-        self.snapshots = snapshots
+        eigvals_iso  = eigvals_opt[:self.rom_dim]                        # (rom_dim,) array
+        eigvecs_iso  = np.atleast_2d(eigvecs_opt[:,:self.rom_dim])       # (ndata, rom_dim) array
+        self.Z_train = (eigvecs_iso @ np.diag(np.sqrt(eigvals_iso)))     # (ndata, rom_dim)  array
 
-        eigvals_iso = eigvals_opt[:self.isomap_degree]                        # (d,) array
-        eigvecs_iso = np.atleast_2d(eigvecs_opt[:,:self.isomap_degree])       # (M,d) array
-        self.latent  = (eigvecs_iso @ np.diag(np.sqrt(eigvals_iso))).T       # (d, M) array
-    
-    def compute_pce(self, X, method, weights=None):
-
-        self.X_train = X
-
-        if not hasattr(self, 'latent'):
-            raise KeyError('You to first do the ISOMAP!')
-    
-        # computing the PCE coefficients on the latent space basis
-        self.pce.compute_coeffs(X, self.latent.T, method=method, weights=weights)
-
-    def moments(self, mc_samples=500):
+    def moments(self, nsamples=500):
 
         # sampling the random inputs X from the standard distributions
-        X_samples = self._sample_x(n_samples=mc_samples)
+        X_samples = self._sample_x(nsamples=nsamples)
 
         # Isomap prediction for the samples set
-        pred_samples = self.predict(X_samples) 
+        Y_pred = self.predict(X_samples) 
 
-        mean = np.mean(pred_samples, axis=0)
-        var  = np.var( pred_samples, axis=0)
+        mean = np.mean(Y_pred, axis=0)
+        var  = np.var( Y_pred, axis=0)
 
         return mean, var
+    
+    @abstractmethod
+    def predict_latent(self, X):
+        return
 
     def predict(self, X):
         '''
@@ -139,17 +137,17 @@ class ISOMAPPCE():
 
         nsamples, _ = X.shape
 
-        Y_pred = np.zeros((nsamples, self.noutputs))
+        Y_pred = np.zeros((nsamples, self.fom_dim))
 
         # predicting the latent variable through PCE 
-        Z_pred = self.pce.predict(X) 
+        Z_pred = self.predict_latent(X)
 
         # fixing Z_pred size
-        if nsamples == 1 and self.isomap_degree == 1:
+        if nsamples == 1 and self.rom_dim == 1:
             Z_pred = np.atleast_2d(Z_pred)
-        elif nsamples > 1 and self.isomap_degree == 1:
+        elif nsamples > 1 and self.rom_dim == 1:
             Z_pred = Z_pred[:,np.newaxis]
-        elif nsamples == 1 and self.isomap_degree > 1:
+        elif nsamples == 1 and self.rom_dim > 1:
             Z_pred = np.atleast_2d(Z_pred)
 
         for smp in range(nsamples):
@@ -158,30 +156,29 @@ class ISOMAPPCE():
             w_opt, neigh_indices = self._backmapping(Z_pred[smp,:])
 
             # prediction as weighted linear linear combination of the near snaps 
-            Y_pred[smp,:] += self.snapshots[neigh_indices, :].T @ w_opt 
+            Y_pred[smp,:] += self.Y_train[neigh_indices, :].T @ w_opt 
 
         return np.squeeze(Y_pred)
     
-    def _sample_x(self, n_samples):
+    def _sample_x(self, nsamples):
         '''
         Generating samples of inputs from standard distributions
         '''
-        X = np.zeros((n_samples, self.dim))
+        X = np.zeros((nsamples, self.uq_dim))
 
         for i_var, var in enumerate(self.pdf_var):
 
             sampler = qmc.LatinHypercube(d = 1)
-            samples = np.squeeze(sampler.random(n_samples))
+            samples = np.squeeze(sampler.random(nsamples))
 
             if var == 'U':
-                #X[:,i_var] = qmc.scale(samples, np.array([-1]), np.array([1]))
                 X[:,i_var] = uniform.ppf(samples, loc=-1, scale=2)
             elif var == 'N':
                 X[:,i_var] = norm.ppf(samples)
 
         return X
 
-    def _compute_dissimilarity(self, Y, k_near, symmetric=True):
+    def _compute_dissimilarity(self, Y, k_near):
         """
         Given an array Y of shape (M, N) where each row is a sample y (length N):
         1) compute Euclidean distances to neighbors,
@@ -191,7 +188,6 @@ class ISOMAPPCE():
         
         Returns:
         dist_matrix : ndarray (M, M) of shortest-path distances (np.inf if unreachable)
-        adj         : scipy.sparse.csr_matrix adjacency matrix used (weights = euclidean distances)
         """
 
         if not (0 < k_near < self.ndata):
@@ -233,7 +229,7 @@ class ISOMAPPCE():
         den = np.sum(D**2)
         return np.sqrt(num/den)
        
-    def _backmapping(self, z_pred):
+    def _backmapping(self, Z_pred):
         '''
         Backmapping procedure from sampled latent variable z_pred to find the 
         optimal weights and the indexes of the k-nearest neighbors among the snapshots.
@@ -242,21 +238,20 @@ class ISOMAPPCE():
         The solution exploits the Schur complement, see Franz et al..
         '''
 
-        # Pairwise Euclidean distance between z_pred and training samples in latent space
-        D_euclid = np.squeeze(cdist(np.atleast_2d(z_pred), self.latent.T, metric='euclidean'))
+        D_euclid = np.squeeze(cdist(np.atleast_2d(Z_pred), self.Z_train, metric='euclidean'))
 
         neigh_indices = np.argsort(D_euclid)[:self.k_near]
 
-        z_neighs = self.latent[:, neigh_indices]
+        Z_neighs = self.Z_train[neigh_indices, :]
 
         # gram matrix G
-        tmp = np.repeat(np.atleast_2d(z_pred).T, repeats=len(neigh_indices), axis=1)
-        G = (tmp - z_neighs).T @ (tmp - z_neighs) 
+        tmp = np.repeat(np.atleast_2d(Z_pred), repeats=len(neigh_indices), axis=0)
+        G = (tmp - Z_neighs) @ (tmp - Z_neighs).T 
 
         # regularization coeffs
         c = np.zeros(self.k_near)
         for i in range(self.k_near):
-            c[i] = np.linalg.norm(z_pred - z_neighs[:,i], 2.0)
+            c[i] = np.linalg.norm(Z_pred - Z_neighs[i,:], 2.0)
         c = 0.01 * (c / np.amax(c))**4.0
 
         # forcing the regularization term
@@ -284,6 +279,90 @@ class ISOMAPPCE():
 
 
 
+class ISOMAPPCE(ISOMAP):
+    '''
+    ISOMAP-based reduced order model with uncertain random input
+    modeled through PCE.
+
+    Nomenclature:
+    - X are the random input variables of the model
+    - Y is the full-order output of the computational model
+    - Z is the set of latent variables (obtained through ISOMAP)
+    ''' 
+
+    def __init__(self, uq_dim, pce_degree, pdf_var, truncation):
+
+        self.uq_dim  = uq_dim
+        self.pdf_var = pdf_var
+
+        # building a PCE object
+        self.pce = PCE(uq_dim, pce_degree, pdf_var, truncation)
+
+    def compute_pce(self, X, method, weights=None):
+
+        self.X_train = X
+
+        if not hasattr(self, 'Z_train'):
+            raise KeyError('You have to first train the ISOMAP!')
+    
+        # computing the PCE coefficients on the latent space basis
+        self.pce.compute_coeffs(X, self.Z_train, method=method, weights=weights)
+
+    def predict_latent(self, X):
+        
+        return self.pce.predict(X)
+
+
+
+class ISOMAPGPR(ISOMAP):
+    '''
+    ISOMAP-based reduced order model with uncertain random input
+    modeled through GPR.
+
+    Nomenclature:
+    - X are the random input variables of the model
+    - Y is the full-order output of the computational model
+    - Z is the set of latent variables (obtained through ISOMAP)
+    '''
+
+    def __init__(self, uq_dim, kernel, pdf_var, nproc, reg_tych):
+
+        self.uq_dim  = uq_dim
+        self.kernel  = kernel
+        self.nproc   = nproc
+        self.tych    = reg_tych
+        self.pdf_var = pdf_var
+
+    def compute_gpr(self, X):
+
+        self.X_train = X
+
+        if not hasattr(self, 'Z_train'):
+            raise KeyError('You have to first train the ISOMAP!')
+        
+        self.gprs = []
+
+        for d in range(self.rom_dim):
+
+            gp = GaussianProcessRegressor(copy.deepcopy(self.kernel),
+                                          nproc=self.nproc,
+                                          reg_tych=self.tych)
+            
+            gp.fit(self.X_train, self.Z_train[:,d])
+
+            self.gprs.append(gp)
+
+    def predict_latent(self, X):
+        
+        nsamples, _ = X.shape
+
+        Z_pred = np.zeros((nsamples, self.rom_dim))
+
+        for d, gp in enumerate(self.gprs):
+
+            Z_pred[:,d] = np.squeeze(gp.predict(X, return_cov=False))
+
+        return Z_pred
 
     
 
