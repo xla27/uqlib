@@ -173,7 +173,9 @@ class ISOMAP():
         # problem definition (SALib)
         sobol_problem = {
             'num_vars': self.uq_dim,
-            'names'   : [f'x{i+1}' for i in range(self.uq_dim)]
+            'names'   : [f'x{i+1}' for i in range(self.uq_dim)],
+            'bounds'  : [],
+            'dists'   : []
         }
 
         for _, var in enumerate(self.pdf_var):
