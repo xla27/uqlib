@@ -317,10 +317,8 @@ class ISOMAP():
         G = (tmp - Z_neighs) @ (tmp - Z_neighs).T 
 
         # regularization coeffs
-        c = np.zeros(self.k_near)
-        for i in range(self.k_near):
-            c[i] = np.linalg.norm(Z_pred - Z_neighs[i,:], 2.0)
-        c = 0.01 * (c / np.amax(c))**4.0
+        cvec = np.linalg.norm(tmp - Z_neighs, 2.0, axis=1)
+        c = 0.01 * (cvec / np.amax(cvec))**4.0
 
         # forcing the regularization term
         G_tilde = G + np.diag(c)
