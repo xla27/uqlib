@@ -1,4 +1,4 @@
-import os, sys, copy
+import os, sys, copy, time
 import numpy as np
 from abc import abstractmethod
 
@@ -156,13 +156,12 @@ class ISOMAP():
         elif nsamples == 1 and self.rom_dim > 1:
             Z_pred = np.atleast_2d(Z_pred)
 
+        # vectorized backmapping for all samples at once
+        w_array, neigh_indices_array = self._backmapping(Z_pred)
+
+        # prediction as weighted linear combination of the near snaps for all samples
         for smp in range(nsamples):
-
-            # finding the optimal weight of the training latent variables closest to the prediction
-            w_opt, neigh_indices = self._backmapping(Z_pred[smp,:])
-
-            # prediction as weighted linear linear combination of the near snaps 
-            Y_pred[smp,:] += self.Y_train[neigh_indices, :].T @ w_opt 
+            Y_pred[smp,:] += self.Y_train[neigh_indices_array[smp], :].T @ w_array[smp]
 
         return np.squeeze(Y_pred)
     
@@ -263,17 +262,17 @@ class ISOMAP():
         
         # Pairwise Euclidean distance
         D_euclid = cdist(Y, Y, metric='euclidean')
+
+        # # Exclude self by setting diagonal to np.inf
+        np.fill_diagonal(D_euclid, np.inf)
+
+        # Find k nearest neighbors for each sample (row)
+        neigh_indices = np.argpartition(D_euclid, kth=k_near, axis=1)[:, :k_near]
         
         # Nearest neighbors using Euclidean distances
         G = np.full((self.ndata, self.ndata), np.inf)
-
-        for i in range(self.ndata):
-
-            # Exclude the point itself and get k nearest neighbors
-            neighbors = np.argsort(D_euclid[i])[1:k_near+1]
-
-            # Assign edge weights
-            G[i, neighbors] = D_euclid[i, neighbors]
+        row_indices = np.arange(self.ndata)[:, None]
+        G[row_indices, neigh_indices] = D_euclid[row_indices, neigh_indices]
         
         # Make graph symmetric (undirected)
         G = np.minimum(G, G.T)
@@ -299,49 +298,47 @@ class ISOMAP():
        
     def _backmapping(self, Z_pred):
         '''
-        Backmapping procedure from sampled latent variable z_pred to find the 
-        optimal weights and the indexes of the k-nearest neighbors among the snapshots.
-        The backmapping weights are an exact solution of a convex quadratic optimization problem subject
-        to linear constraints.
-        The solution exploits the Schur complement, see Franz et al..
+        Fully vectorized backmapping for multiple latent samples.
+        Given an array Z_pred of shape (nsamples, rom_dim), computes the optimal weights 
+        and nearest neighbor indices for each sample simultaneously, avoiding explicit Python loops except for the QP solve.
         '''
+        nsamples = Z_pred.shape[0]
+        k = self.k_near
 
-        D_euclid = np.squeeze(cdist(np.atleast_2d(Z_pred), self.Z_train, metric='euclidean'))
+        # Compute pairwise Euclidean distances: (nsamples, ndata)
+        D_euclid = cdist(Z_pred, self.Z_train, metric='euclidean')
 
-        neigh_indices = np.argsort(D_euclid)[:self.k_near]
+        # Find k-nearest neighbors for each sample: (nsamples, k)
+        neigh_indices_array = np.argpartition(D_euclid, kth=k-1, axis=1)[:, :k]
 
-        Z_neighs = self.Z_train[neigh_indices, :]
+        # Gather neighbor latent vectors: (nsamples, k, rom_dim)
+        Z_neighs = self.Z_train[neigh_indices_array]  # (nsamples, k, rom_dim)
+        Z_pred_expanded = Z_pred[:, np.newaxis, :]    # (nsamples, 1, rom_dim)
+        diffs = Z_pred_expanded - Z_neighs            # (nsamples, k, rom_dim)
 
-        # gram matrix G
-        tmp = np.repeat(np.atleast_2d(Z_pred), repeats=len(neigh_indices), axis=0)
-        G = (tmp - Z_neighs) @ (tmp - Z_neighs).T 
+        # Gram matrices G: (nsamples, k, k)
+        G = np.einsum('nik,njk->nij', diffs, diffs)
 
-        # regularization coeffs
-        cvec = np.linalg.norm(tmp - Z_neighs, 2.0, axis=1)
-        c = 0.01 * (cvec / np.amax(cvec))**4.0
+        # Regularization coefficients: (nsamples, k)
+        cvec = np.linalg.norm(diffs, axis=2)
+        c = 0.01 * (cvec / np.amax(cvec, axis=1, keepdims=True))**4.0
 
-        # forcing the regularization term
-        G_tilde = G + np.diag(c)
-        A = 2*G_tilde
-        
-        # solution of the quadratic constrained optimization problem 
+        # Regularized Gram matrices: (nsamples, k, k)
+        G_tilde = G + np.array([np.diag(c[i]) for i in range(nsamples)])
+        A = 2 * G_tilde
+
+        # solution of the quadratic constrained optimization problem (vectorized) 
         # w.T @ A @ w s.t. \sum w_i = 1
         # W_opt = (Ainv @ 1) / (1.T @ Ainv @ 1)
-        while True:
-            try:
-                L = cholesky(A, lower=True)
-                break
-            except:
-                l, V = eigh(A)
-                A = V @ np.diag(np.clip(l, a_min=1e-8, a_max=None)) @ V.T
+        one_vec = np.ones((nsamples, k))   
+        L = cholesky(A, lower=True)                                                      # (nsamples, k, k)
+        Ainv = cho_solve((L, True), 
+                         np.repeat(np.eye(k)[np.newaxis,...], repeats=nsamples, axis=0)) # (nsamples, k, k)
+        AinvOnes = np.einsum('ijk,ik->ij', Ainv, one_vec)                                # (nsamples, k)
+        S = np.einsum('ij,ij->i', one_vec, AinvOnes)                                     # (nsamples)
+        w_array = np.einsum('i,ij->ij', 1/S, AinvOnes)                                   # (nsamples, k)
 
-        one_vec = np.ones(len(neigh_indices))
-        Ainv = cho_solve((L,True), np.eye(len(neigh_indices)))
-        AinvOnes = Ainv @ one_vec
-        S = one_vec.T @ AinvOnes
-        w_opt = 1/S * AinvOnes
-
-        return w_opt, neigh_indices
+        return w_array, neigh_indices_array
 
 
 
@@ -436,9 +433,9 @@ class ISOMAPGPR(ISOMAP):
 
             Z_pred[:,d] = np.squeeze(gp.predict(X, return_cov=False))
 
-        return Z_pred
+        return np.squeeze(Z_pred)
 
-    
+
 
 
 
