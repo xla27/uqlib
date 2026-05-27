@@ -330,7 +330,9 @@ class PCE():
         if not hasattr(self, 'err_mse'):
             self.compute_err_mse()
 
-        score = np.ones(self.noutputs) - self.err_mse / np.var(self.y_train, axis=0)
+        y_train_var = np.var(self.y_train, axis=0)
+
+        score = np.ones(self.noutputs) - self.err_mse / np.where(y_train_var == 0, 1e-12, y_train_var)
 
         return np.squeeze(score)
     

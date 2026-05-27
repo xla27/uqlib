@@ -1,4 +1,4 @@
-import os, sys, copy
+import os, sys, copy, time
 import numpy as np
 from abc import abstractmethod
 
@@ -7,11 +7,9 @@ from scipy.spatial.distance import pdist, cdist, squareform
 from scipy.stats import qmc, norm, uniform
 from scipy.sparse.csgraph import shortest_path
 
-from SALib.sample import sobol as sob_sample
-from SALib.analyze import sobol as sob_analyze
-
 from ..pce import PCE
 from ..gp  import GaussianProcessRegressor
+from .common import sobol_wrapper
 
 class ISOMAP():
     '''
@@ -156,13 +154,12 @@ class ISOMAP():
         elif nsamples == 1 and self.rom_dim > 1:
             Z_pred = np.atleast_2d(Z_pred)
 
+        # vectorized backmapping for all samples at once
+        w_array, neigh_indices_array = self._backmapping(Z_pred)
+
+        # prediction as weighted linear combination of the near snaps for all samples
         for smp in range(nsamples):
-
-            # finding the optimal weight of the training latent variables closest to the prediction
-            w_opt, neigh_indices = self._backmapping(Z_pred[smp,:])
-
-            # prediction as weighted linear linear combination of the near snaps 
-            Y_pred[smp,:] += self.Y_train[neigh_indices, :].T @ w_opt 
+            Y_pred[smp,:] += self.Y_train[neigh_indices_array[smp], :].T @ w_array[smp]
 
         return np.squeeze(Y_pred)
     
@@ -170,63 +167,11 @@ class ISOMAP():
         '''
         Sobol' indices estimation through Saltelli's sampling
         '''
-        # problem definition (SALib)
-        sobol_problem = {
-            'num_vars': self.uq_dim,
-            'names'   : [f'x{i+1}' for i in range(self.uq_dim)],
-            'bounds'  : [],
-            'dists'   : []
-        }
-
-        for _, var in enumerate(self.pdf_var):
-
-            if var == 'U':
-                sobol_problem['bounds'].append([-1.0, 1.0])
-                sobol_problem['dists'].append('unif')
-
-            elif var == 'N':
-                sobol_problem['bounds'].append([0.0, 1.0])
-                sobol_problem['dists'].append('norm') 
-
-        # samples generation in UQ space
-        X_sobol = sob_sample.sample(sobol_problem,
-                                    n_mc,
-                                    calc_second_order=calc_second)
-        
-        # FOM prediction
-        Y_sobol = self.predict(X_sobol)
-
-        # computing Sobol' indices
-        s1 = np.zeros((self.uq_dim, self.fom_dim))
-        st = np.zeros((self.uq_dim, self.fom_dim))
-        if calc_second:
-            s2 = np.zeros((int(self.uq_dim * (self.uq_dim - 1) / 2), self.fom_dim)) 
-
-        for i_out in range(self.fom_dim):
-
-            s = sob_analyze.analyze(sobol_problem, 
-                              Y_sobol[:,i_out], 
-                              calc_second_order=calc_second,
-                              n_processors=nproc)
-            
-            s1[:,i_out] = s['S1']
-            st[:,i_out] = s['ST']
-            if calc_second:
-                s2[:,i_out] = s['S2']
-
-        if calc_second:
-
-            if return_total:
-                return s1, s2, st
-            else:
-                return s1, s2
-            
-        else:
-
-            if return_total:
-                return s1, st
-            else:
-                return s1
+        return sobol_wrapper(self, 
+                             calc_second=calc_second, 
+                             return_total=return_total,
+                             n_mc=n_mc,
+                             nproc=nproc)
     
     def _sample_x(self, nsamples):
         '''
@@ -263,17 +208,17 @@ class ISOMAP():
         
         # Pairwise Euclidean distance
         D_euclid = cdist(Y, Y, metric='euclidean')
+
+        # # Exclude self by setting diagonal to np.inf
+        np.fill_diagonal(D_euclid, np.inf)
+
+        # Find k nearest neighbors for each sample (row)
+        neigh_indices = np.argpartition(D_euclid, kth=k_near, axis=1)[:, :k_near]
         
         # Nearest neighbors using Euclidean distances
         G = np.full((self.ndata, self.ndata), np.inf)
-
-        for i in range(self.ndata):
-
-            # Exclude the point itself and get k nearest neighbors
-            neighbors = np.argsort(D_euclid[i])[1:k_near+1]
-
-            # Assign edge weights
-            G[i, neighbors] = D_euclid[i, neighbors]
+        row_indices = np.arange(self.ndata)[:, None]
+        G[row_indices, neigh_indices] = D_euclid[row_indices, neigh_indices]
         
         # Make graph symmetric (undirected)
         G = np.minimum(G, G.T)
@@ -299,51 +244,70 @@ class ISOMAP():
        
     def _backmapping(self, Z_pred):
         '''
-        Backmapping procedure from sampled latent variable z_pred to find the 
-        optimal weights and the indexes of the k-nearest neighbors among the snapshots.
-        The backmapping weights are an exact solution of a convex quadratic optimization problem subject
-        to linear constraints.
-        The solution exploits the Schur complement, see Franz et al..
+        Fully vectorized backmapping for multiple latent samples.
+        Given an array Z_pred of shape (nsamples, rom_dim), computes the optimal weights 
+        and nearest neighbor indices for each sample simultaneously, avoiding explicit Python loops except for the QP solve.
         '''
+        nsamples = Z_pred.shape[0]
+        k = self.k_near
 
-        D_euclid = np.squeeze(cdist(np.atleast_2d(Z_pred), self.Z_train, metric='euclidean'))
+        # Compute pairwise Euclidean distances: (nsamples, ndata)
+        D_euclid = cdist(Z_pred, self.Z_train, metric='euclidean')
 
-        neigh_indices = np.argsort(D_euclid)[:self.k_near]
+        # Find k-nearest neighbors for each sample: (nsamples, k)
+        neigh_indices_array = np.argpartition(D_euclid, kth=k-1, axis=1)[:, :k]
 
-        Z_neighs = self.Z_train[neigh_indices, :]
+        # Gather neighbor latent vectors: (nsamples, k, rom_dim)
+        Z_neighs = self.Z_train[neigh_indices_array]  # (nsamples, k, rom_dim)
+        Z_pred_expanded = Z_pred[:, np.newaxis, :]    # (nsamples, 1, rom_dim)
+        diffs = Z_pred_expanded - Z_neighs            # (nsamples, k, rom_dim)
 
-        # gram matrix G
-        tmp = np.repeat(np.atleast_2d(Z_pred), repeats=len(neigh_indices), axis=0)
-        G = (tmp - Z_neighs) @ (tmp - Z_neighs).T 
+        # Gram matrices G: (nsamples, k, k)
+        G = np.einsum('nik,njk->nij', diffs, diffs)
 
-        # regularization coeffs
-        c = np.zeros(self.k_near)
-        for i in range(self.k_near):
-            c[i] = np.linalg.norm(Z_pred - Z_neighs[i,:], 2.0)
-        c = 0.01 * (c / np.amax(c))**4.0
+        # Regularization coefficients: (nsamples, k)
+        cvec = np.linalg.norm(diffs, axis=2)
+        c = 0.01 * (cvec / np.amax(cvec, axis=1, keepdims=True))**4.0
 
-        # forcing the regularization term
-        G_tilde = G + np.diag(c)
-        A = 2*G_tilde
-        
-        # solution of the quadratic constrained optimization problem 
+        # Regularized Gram matrices: (nsamples, k, k)
+        G_tilde = G + np.array([np.diag(c[i]) for i in range(nsamples)])
+        A = 2 * G_tilde
+
+        # solution of the quadratic constrained optimization problem (vectorized) 
         # w.T @ A @ w s.t. \sum w_i = 1
         # W_opt = (Ainv @ 1) / (1.T @ Ainv @ 1)
-        while True:
-            try:
-                L = cholesky(A, lower=True)
-                break
-            except:
-                l, V = eigh(A)
-                A = V @ np.diag(np.clip(l, a_min=1e-8, a_max=None)) @ V.T
+        one_vec = np.ones((nsamples, k))
+        
+        # Try Cholesky decomposition with robust handling of non-positive-definite matrices
+        try:
+            L = cholesky(A, lower=True)  # (nsamples, k, k)
 
-        one_vec = np.ones(len(neigh_indices))
-        Ainv = cho_solve((L,True), np.eye(len(neigh_indices)))
-        AinvOnes = Ainv @ one_vec
-        S = one_vec.T @ AinvOnes
-        w_opt = 1/S * AinvOnes
+        except np.linalg.LinAlgError:
 
-        return w_opt, neigh_indices
+            # Handle case where some A[i,:,:] are not positive definite
+            # Compute eigenvalues for each slice: (nsamples, k)
+            eigvals = np.linalg.eigvalsh(A)  # (nsamples, k)
+            min_eigvals = np.min(eigvals, axis=1)  # (nsamples,)
+            
+            # Add regularization to ensure positive definiteness
+            # For each sample, add -min_eigval + eps to diagonal
+            eps = 1e-8
+            reg_term = np.maximum(-min_eigvals + eps, 0.0)  # (nsamples,)
+            reg_matrices = np.einsum('i,jk->ijk', reg_term, np.eye(k))  # (nsamples, k, k)
+
+            A += reg_matrices
+            
+            # Retry Cholesky decomposition
+            L = cholesky(A, lower=True)  # (nsamples, k, k)
+        
+        Ainv = cho_solve((L, True), 
+                         np.repeat(np.eye(k)[np.newaxis,...], repeats=nsamples, axis=0)) # (nsamples, k, k)
+        
+        AinvOnes = np.einsum('ijk,ik->ij', Ainv, one_vec)                                # (nsamples, k)
+        S        = np.einsum('ij,ij->i', one_vec, AinvOnes)                              # (nsamples)
+        w_array  = np.einsum('i,ij->ij', 1/S, AinvOnes)                                  # (nsamples, k)
+
+        return w_array, neigh_indices_array
 
 
 
@@ -438,9 +402,9 @@ class ISOMAPGPR(ISOMAP):
 
             Z_pred[:,d] = np.squeeze(gp.predict(X, return_cov=False))
 
-        return Z_pred
+        return np.squeeze(Z_pred)
 
-    
+
 
 
 
