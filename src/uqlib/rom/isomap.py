@@ -276,13 +276,36 @@ class ISOMAP():
         # solution of the quadratic constrained optimization problem (vectorized) 
         # w.T @ A @ w s.t. \sum w_i = 1
         # W_opt = (Ainv @ 1) / (1.T @ Ainv @ 1)
-        one_vec = np.ones((nsamples, k))   
-        L = cholesky(A, lower=True)                                                      # (nsamples, k, k)
+        one_vec = np.ones((nsamples, k))
+        
+        # Try Cholesky decomposition with robust handling of non-positive-definite matrices
+        try:
+            L = cholesky(A, lower=True)  # (nsamples, k, k)
+
+        except np.linalg.LinAlgError:
+
+            # Handle case where some A[i,:,:] are not positive definite
+            # Compute eigenvalues for each slice: (nsamples, k)
+            eigvals = np.linalg.eigvalsh(A)  # (nsamples, k)
+            min_eigvals = np.min(eigvals, axis=1)  # (nsamples,)
+            
+            # Add regularization to ensure positive definiteness
+            # For each sample, add -min_eigval + eps to diagonal
+            eps = 1e-8
+            reg_term = np.maximum(-min_eigvals + eps, 0.0)  # (nsamples,)
+            reg_matrices = np.einsum('i,jk->ijk', reg_term, np.eye(k))  # (nsamples, k, k)
+
+            A += reg_matrices
+            
+            # Retry Cholesky decomposition
+            L = cholesky(A, lower=True)  # (nsamples, k, k)
+        
         Ainv = cho_solve((L, True), 
                          np.repeat(np.eye(k)[np.newaxis,...], repeats=nsamples, axis=0)) # (nsamples, k, k)
+        
         AinvOnes = np.einsum('ijk,ik->ij', Ainv, one_vec)                                # (nsamples, k)
-        S = np.einsum('ij,ij->i', one_vec, AinvOnes)                                     # (nsamples)
-        w_array = np.einsum('i,ij->ij', 1/S, AinvOnes)                                   # (nsamples, k)
+        S        = np.einsum('ij,ij->i', one_vec, AinvOnes)                              # (nsamples)
+        w_array  = np.einsum('i,ij->ij', 1/S, AinvOnes)                                  # (nsamples, k)
 
         return w_array, neigh_indices_array
 
