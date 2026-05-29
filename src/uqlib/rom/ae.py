@@ -40,23 +40,20 @@ class AE():
         self.model = model_nn
 
         self._preprocess_y(Y)
-        
-        world_size = torch.cuda.device_count() if torch.cuda.is_available() else int(nproc)
 
         if not options: options = {}
 
-        if not hasattr(options, 'epochs'):     options['epochs'] = 50
-        if not hasattr(options, 'batch_size'): options['batch_size'] = 4
-        if not hasattr(options, 'lr'):         options['lr'] = 1e-3
+        if not 'epochs'     in options.keys(): options['epochs'] = 50
+        if not 'batch_size' in options.keys(): options['batch_size'] = 4
+        if not 'lr'         in options.keys(): options['lr'] = 1e-3
 
-        mp.spawn(
-            self._train,
-            args=(world_size, 
-                  self.Y_train, 
-                  *options),
-            nprocs=world_size,
-            join=True
-        )
+        # Use simple single-machine multi-GPU training without distributed setup
+        # Single GPU/CPU training
+        self._train(self.Y_train,
+                    nproc,
+                    options['epochs'],
+                    options['batch_size'],
+                    options['lr'],)
 
         self.load_ae(model_nn, Y, "cfd_autoencoder.pt")
 
@@ -174,39 +171,29 @@ class AE():
 
         return X
 
-    def _train(self, rank, world_size, data_tensor, epochs=50, batch_size=4, lr=1e-3):
-
-        os.environ["MASTER_ADDR"] = "127.0.0.1"
-        os.environ["MASTER_PORT"] = "23456"
-
-        dist.init_process_group(
-            backend="nccl" if torch.cuda.is_available() else "gloo",
-            rank=rank,
-            world_size=world_size
-        )
-
-        device = torch.device(f"cuda:{rank}" if torch.cuda.is_available() else "cpu")
-
-        # ---- dataset + sampler ----
-        dataset = TensorDataset(data_tensor)
-        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
-        loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler)
-
-        # ---- model ----
+    def _train(self, data_tensor, num_workers=1, epochs=50, batch_size=4, lr=1e-3):
+        """
+        Single GPU/CPU training without distributed setup.
+        """
+        device = self.device
         model = self.model.to(device)
-        model = DDP(model, device_ids=[rank] if torch.cuda.is_available() else None)
+
+        # Use DataParallel for multi-GPU if available
+        if torch.cuda.device_count() > 1:
+            model = nn.DataParallel(model)
+
+        # ---- dataset ----
+        dataset = TensorDataset(data_tensor)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 
         # ---- optimizer with L2 regularization ----
         optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
 
         # ---- training loop ----
         for epoch in range(epochs):
-            sampler.set_epoch(epoch)
-
             total_loss = 0.0
 
             for (x,) in loader:
-                
                 x = x.to(device)
 
                 recon = model(x)
@@ -218,16 +205,16 @@ class AE():
 
                 total_loss += loss.item()
 
-            if rank == 0:
-                print(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(loader):.6f}")
+            print(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(loader):.6f}")
 
-        if rank == 0:
-            torch.save({
-                "model_state_dict": model.module.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-            }, "cfd_autoencoder.pt")
+        # Save checkpoint
+        checkpoint_model = model.module if isinstance(model, nn.DataParallel) else model
+        torch.save({
+            "model_state_dict": checkpoint_model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+        }, "cfd_autoencoder.pt")
 
-        dist.destroy_process_group()
+
 
 
 
