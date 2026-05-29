@@ -1,4 +1,4 @@
-import os, sys
+import os, sys, copy
 import numpy as np
 from abc import abstractmethod
 from scipy.stats import qmc, norm, uniform
@@ -13,6 +13,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import TensorDataset, DataLoader, DistributedSampler
 
 from ..pce import PCE
+from ..gp  import GaussianProcessRegressor
+from .common import sobol_wrapper
 
 class AE():
 
@@ -138,6 +140,16 @@ class AE():
 
         return mean, var   
 
+    def sobol(self, calc_second=False, return_total=False, n_mc=1024, nproc=1):
+        '''
+        Sobol' indices estimation through Saltelli's sampling
+        '''
+        return sobol_wrapper(self, 
+                             calc_second=calc_second, 
+                             return_total=return_total,
+                             n_mc=n_mc,
+                             nproc=nproc)
+
     def _preprocess_y(self, Y):
 
         self.ndata, self.nfields, self.nx, self.ny = Y.shape
@@ -207,13 +219,13 @@ class AE():
 
             print(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(loader):.6f}")
 
-        # Save checkpoint
-        checkpoint_model = model.module if isinstance(model, nn.DataParallel) else model
-        torch.save({
-            "model_state_dict": checkpoint_model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-        }, "cfd_autoencoder.pt")
-
+            # Save checkpoint
+            if epoch % 50 == 0:
+                checkpoint_model = model.module if isinstance(model, nn.DataParallel) else model
+                torch.save({
+                    "model_state_dict": checkpoint_model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                }, "cfd_autoencoder.pt")
 
 
 
@@ -224,8 +236,16 @@ def loss_fn(recon, x):
 
 
 
-
 class AEPCE(AE):
+    '''
+    AE-based reduced order model with uncertain random input
+    modeled through PCE.
+
+    Nomenclature:
+    - X are the random input variables of the model
+    - Y is the full-order output of the computational model
+    - Z is the set of latent variables (obtained through AE)
+    ''' 
 
     def __init__(self, uq_dim, rom_dim, pce_degree, pdf_var, truncation):
 
@@ -256,4 +276,56 @@ class AEPCE(AE):
         return self.pce.predict(X)
     
 
+class AEGPR(AE):
+    '''
+    AE-based reduced order model with uncertain random input
+    modeled through GPR.
 
+    Nomenclature:
+    - X are the random input variables of the model
+    - Y is the full-order output of the computational model
+    - Z is the set of latent variables (obtained through AE)
+    ''' 
+
+    def __init__(self, uq_dim, kernel, pdf_var, nproc, reg_tych):
+
+        self.uq_dim  = uq_dim
+        self.kernel  = kernel
+        self.nproc   = nproc
+        self.tych    = reg_tych
+        self.pdf_var = pdf_var
+
+    def compute_gpr(self, X):
+
+        self.X_train = X
+
+        if not hasattr(self, 'Z_train'):
+            raise KeyError('You have to first train the ISOMAP!')
+        
+        self.gprs = []
+
+        for d in range(self.rom_dim):
+
+            gp = GaussianProcessRegressor(copy.deepcopy(self.kernel),
+                                          nproc=self.nproc,
+                                          reg_tych=self.tych)
+            
+            gp.fit(self.X_train, self.Z_train[:,d])
+
+            self.gprs.append(gp)
+
+    def predict_latent(self, X):
+        '''
+        Latent prediction from random input sample
+        X is a (nsamples, uq_dim) numpy.array of inputs
+        Z is a (nsamples, rom_dim) numpy.array of predictions
+        '''
+        nsamples, _ = X.shape
+
+        Z_pred = np.zeros((nsamples, self.rom_dim))
+
+        for d, gp in enumerate(self.gprs):
+
+            Z_pred[:,d] = np.squeeze(gp.predict(X, return_cov=False))
+
+        return np.squeeze(Z_pred)
