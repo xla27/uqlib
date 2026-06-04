@@ -347,7 +347,7 @@ class PCE():
         '''
         Generating samples of inputs from standard distributions
         '''
-        X = np.zeros((nsamples, self.uq_dim))
+        X = np.zeros((nsamples, self.dim))
 
         for i_var, var in enumerate(self.pdf_var):
 
