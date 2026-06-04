@@ -3,6 +3,7 @@ import os, sys, shutil
 import numpy as np
 import math
 from scipy.special import legendre, hermitenorm, genlaguerre, jacobi, gamma
+from scipy.stats import qmc, uniform, norm
 from scipy.linalg import cho_solve, cho_factor
 
 from itertools import product, combinations
@@ -205,6 +206,12 @@ class PCE():
         else:
             return np.squeeze(y)      
     
+    def sample(self, nsamples):
+
+        X = self._sample_x(nsamples=nsamples)
+
+        return self.predict(X, eval_gradient=False)
+
     def sobol_first(self):
         """
         s is a (dim, noutputs) numpy.array of first order Sobol' indices
@@ -335,6 +342,24 @@ class PCE():
         score = np.ones(self.noutputs) - self.err_mse / np.where(y_train_var == 0, 1e-12, y_train_var)
 
         return np.squeeze(score)
+    
+    def _sample_x(self, nsamples):
+        '''
+        Generating samples of inputs from standard distributions
+        '''
+        X = np.zeros((nsamples, self.uq_dim))
+
+        for i_var, var in enumerate(self.pdf_var):
+
+            sampler = qmc.LatinHypercube(d = 1)
+            samples = np.squeeze(sampler.random(nsamples))
+
+            if var == 'U':
+                X[:,i_var] = uniform.ppf(samples, loc=-1, scale=2)
+            elif var == 'N':
+                X[:,i_var] = norm.ppf(samples)
+
+        return X
     
 
     
