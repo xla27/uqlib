@@ -45,9 +45,10 @@ class AE():
 
         if not options: options = {}
 
-        if not 'epochs'     in options.keys(): options['epochs'] = 50
+        if not 'epochs'     in options.keys(): options['epochs']     = 50
         if not 'batch_size' in options.keys(): options['batch_size'] = 4
-        if not 'lr'         in options.keys(): options['lr'] = 1e-3
+        if not 'lr'         in options.keys(): options['lr']         = 1e-3
+        if not 'filename'   in options.keys(): options['filename']   = "cfd_autoencoder.pt"
 
         # Use simple single-machine multi-GPU training without distributed setup
         # Single GPU/CPU training
@@ -55,9 +56,10 @@ class AE():
                     nproc,
                     options['epochs'],
                     options['batch_size'],
-                    options['lr'],)
+                    options['lr'],
+                    options['filename'])
 
-        self.load_ae(model_nn, Y, "cfd_autoencoder.pt")
+        self.load_ae(model_nn, Y, options['filename'])
 
     def load_ae(self, model_nn, Y, filename):
 
@@ -183,7 +185,7 @@ class AE():
 
         return X
 
-    def _train(self, data_tensor, num_workers=1, epochs=50, batch_size=4, lr=1e-3):
+    def _train(self, data_tensor, num_workers=1, epochs=50, batch_size=4, lr=1e-3, filename="cfd_autoencoder.pt"):
         """
         Single GPU/CPU training without distributed setup.
         """
@@ -225,7 +227,7 @@ class AE():
                 torch.save({
                     "model_state_dict": checkpoint_model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
-                }, "cfd_autoencoder.pt")
+                }, filename)
 
 
 
