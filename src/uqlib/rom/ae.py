@@ -12,6 +12,8 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import TensorDataset, DataLoader, DistributedSampler
 
+import socket
+
 from ..pce import PCE
 from ..gp  import GaussianProcessRegressor
 from .common import sobol_wrapper
@@ -22,67 +24,26 @@ class AE():
 
         self.uq_dim = uq_dim
         self.rom_dim = rom_dim
-        self.model  = None
-        self.model_trained = None
-        self.device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
+        self.autoencoder = None
 
-    def train_ae(self, model_nn, Y, nproc, options):
-        """
-        AE training wrapper:
-        - Y tensor of shape (ndata, nfields, n_x, n_y)
-        - model_nn is the AE model (constructed outside the library)
-        """
+    def load_ae(self, autoencoder, dataset, device, filename):
 
-        if not hasattr(model_nn, 'encoder'):
-            raise Exception('NN model missing encoder attribute!')
-        
-        if not hasattr(model_nn, 'decoder'):
-            raise Exception('NN model missing decoder attribute!')
+        self.dataset = dataset
 
-        self.model = model_nn
-
-        self._preprocess_y(Y)
-
-        if not options: options = {}
-
-        if not 'epochs'     in options.keys(): options['epochs']     = 50
-        if not 'batch_size' in options.keys(): options['batch_size'] = 4
-        if not 'lr'         in options.keys(): options['lr']         = 1e-3
-        if not 'filename'   in options.keys(): options['filename']   = "cfd_autoencoder.pt"
-
-        # Use simple single-machine multi-GPU training without distributed setup
-        # Single GPU/CPU training
-        self._train(self.Y_train,
-                    nproc,
-                    options['epochs'],
-                    options['batch_size'],
-                    options['lr'],
-                    options['filename'])
-
-        self.load_ae(model_nn, Y, options['filename'])
-
-    def load_ae(self, model_nn, Y, filename):
-
-        model = model_nn
+        self.device = device
 
         checkpoint = torch.load(filename)
 
-        model.load_state_dict(checkpoint['model_state_dict'])
+        autoencoder.load_state_dict(checkpoint)
 
-        model.eval()
+        autoencoder.to(device)
 
-        self.model_trained = model
+        autoencoder.eval()
 
-        self._preprocess_y(Y)
+        self.autoencoder = autoencoder
 
         with torch.no_grad():
-            Z_train = self.model_trained.encoder(self.Y_train.to(self.device)).cpu()
-            Y_recon = self.model_trained.decoder(Z_train.to(self.device))
-            Y_recon = Y_recon[:, :, :self.nx, :self.ny]
-
-        recon_err = torch.norm(self.Y_train - Y_recon) / torch.norm(self.Y_train)
-
-        print(f'\tReconstruction error: {recon_err:.2e}')
+            Z_train = self.autoencoder.encoder(self.Y_train.to(self.device)).cpu()
 
         self.Z_train = Z_train
 
@@ -112,7 +73,7 @@ class AE():
         # predicting the latent variable through PCE 
         Z_pred = self.predict_latent(X)
 
-        # fixing Z_pred size
+        # fixing Z_pred size, decoder input size: (nsamples, rom_dim)
         if nsamples == 1 and self.rom_dim == 1:
             Z_pred = np.atleast_2d(Z_pred)
         elif nsamples > 1 and self.rom_dim == 1:
@@ -121,15 +82,13 @@ class AE():
             Z_pred = np.atleast_2d(Z_pred)
 
         with torch.no_grad():
-            Y_pred = self.model_trained.decoder(
+            Y_pred = self.autoencoder.decoder(
                 torch.tensor(Z_pred, dtype=torch.float32).to(self.device)
             ).numpy()
-            Y_pred = Y_pred[:, :, :self.nx, :self.ny]
 
-        for f in range(self.nfields):
-            Y_pred[:,f,:,:] = self.Y_min[f] + Y_pred[:,f,:,:] * (self.Y_max[f] - self.Y_min[f])
+        Y_pred = self._denormalize_y()
 
-        return np.squeeze(Y_pred)
+        return Y_pred
 
     def moments(self, nsamples=1000):
         
@@ -140,7 +99,7 @@ class AE():
         mean = np.mean(Y_pred, axis=0)
         var  = np.var( Y_pred, axis=0)
 
-        return mean, var   
+        return mean[np.newaxis,...], var[np.newaxis,...]   
 
     def sobol(self, calc_second=False, return_total=False, n_mc=1024, nproc=1):
         '''
@@ -152,20 +111,14 @@ class AE():
                              n_mc=n_mc,
                              nproc=nproc)
 
-    def _preprocess_y(self, Y):
+    def _denormalize_y(self, Y):
+        '''
+        Denormalize FOM Y predictions, dataset must be an
+        instantiation of torch.utils.data.Dataset with a 
+        denormalize() method
+        '''
 
-        self.ndata, self.nfields, self.nx, self.ny = Y.shape
-
-        self.Y_min = np.zeros(self.nfields)
-        self.Y_max = np.zeros(self.nfields)
-        Y_train = np.zeros_like(Y)
-
-        for f in range(self.nfields):
-            self.Y_min[f] = np.amin(Y[:,f,:,:])
-            self.Y_max[f] = np.amax(Y[:,f,:,:])
-            Y_train[:,f,:,:] = (Y[:,f,:,:] - self.Y_min[f]) / (self.Y_max[f] - self.Y_min[f])
-
-        self.Y_train = torch.tensor(Y_train, dtype=torch.float32)
+        return self.dataset.denormalize(Y)
 
     def _sample_x(self, nsamples):
         '''
@@ -184,58 +137,6 @@ class AE():
                 X[:,i_var] = norm.ppf(samples)
 
         return X
-
-    def _train(self, data_tensor, num_workers=1, epochs=50, batch_size=4, lr=1e-3, filename="cfd_autoencoder.pt"):
-        """
-        Single GPU/CPU training without distributed setup.
-        """
-        device = self.device
-        model = self.model.to(device)
-
-        # Use DataParallel for multi-GPU if available
-        if torch.cuda.device_count() > 1:
-            model = nn.DataParallel(model)
-
-        # ---- dataset ----
-        dataset = TensorDataset(data_tensor)
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-
-        # ---- optimizer with L2 regularization ----
-        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-
-        # ---- training loop ----
-        for epoch in range(epochs):
-            total_loss = 0.0
-
-            for (x,) in loader:
-                x = x.to(device)
-
-                recon = model(x)
-                loss = loss_fn(recon, x)
-
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                total_loss += loss.item()
-
-            print(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss/len(loader):.6f}")
-
-            # Save checkpoint
-            if epoch % 50 == 0:
-                checkpoint_model = model.module if isinstance(model, nn.DataParallel) else model
-                torch.save({
-                    "model_state_dict": checkpoint_model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                }, filename)
-
-
-
-
-def loss_fn(recon, x):
-    mse = nn.functional.mse_loss(recon, x)
-    return mse
-
 
 
 class AEPCE(AE):
